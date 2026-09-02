@@ -186,6 +186,7 @@ pub struct MenuItem {
     label: SharedString,
     detail: Option<AnyElement>,
     selected: bool,
+    highlighted: bool,
     checked: bool,
     disabled: bool,
     separator: bool,
@@ -206,6 +207,7 @@ impl MenuItem {
             label: label.into(),
             detail: None,
             selected: false,
+            highlighted: false,
             checked: false,
             face: None,
             disabled: false,
@@ -228,12 +230,18 @@ impl MenuItem {
         self
     }
 
+    pub fn highlighted(mut self, highlighted: bool) -> Self {
+        self.highlighted = highlighted;
+        self
+    }
+
     pub fn separator(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
             label: SharedString::default(),
             detail: None,
             selected: false,
+            highlighted: false,
             checked: false,
             disabled: true,
             separator: true,
@@ -431,6 +439,7 @@ impl RenderOnce for Menu {
                 label,
                 detail,
                 selected,
+                highlighted,
                 checked,
                 disabled,
                 separator,
@@ -480,7 +489,9 @@ impl RenderOnce for Menu {
                     |this| this.text_color(theme.muted_foreground).cursor_default(),
                     |this| this.cursor_pointer(),
                 )
-                .when(selected, |this| this.bg(theme.secondary_active))
+                .when(selected || highlighted, |this| {
+                    this.bg(theme.secondary_active)
+                })
                 .when(!disabled, |this| {
                     this.hover(move |this| this.bg(theme.secondary_hover))
                 })
