@@ -405,8 +405,7 @@ impl SettingsView {
         let muted = theme.muted_foreground;
         let small = theme.text(Text::Small);
         let chosen = self.settings.read(cx).font().to_owned();
-        let bundled = chosen == SYSTEM_FONT;
-        let current = match bundled {
+        let current = match chosen == SYSTEM_FONT {
             true => t!("settings-typeface-system"),
             false => SharedString::from(chosen.clone()),
         };

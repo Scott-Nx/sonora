@@ -6818,7 +6818,6 @@ version = "0.28.1"
 dependencies = [
  "anyhow",
  "dirs",
- "embed",
  "env_logger",
  "gpui",
  "gpui_platform",

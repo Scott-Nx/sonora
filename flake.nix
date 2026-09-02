@@ -76,8 +76,6 @@
               done
               install -Dm444 ${./COPYING} "$out/share/licenses/sonora/LICENSE"
               install -Dm444 ${./THIRD-PARTY.md} "$out/share/licenses/sonora/THIRD-PARTY.md"
-              install -Dm444 ${./assets/fonts/LICENSE.txt} \
-                "$out/share/licenses/sonora/LICENSE.Inter"
               for licence in ${./assets/icons}/*/LICENSE; do
                 pack="$(basename "$(dirname "$licence")")"
                 install -Dm444 "$licence" \
@@ -102,7 +100,6 @@
               mainProgram = "sonora";
               license = with pkgs.lib.licenses; [
                 gpl3Plus
-                ofl
                 isc
               ];
               platforms = pkgs.lib.platforms.linux;

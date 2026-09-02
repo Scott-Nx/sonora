@@ -13,9 +13,8 @@ A native music streaming client, built with Rust and [GPUI](https://github.com/z
    See [Theme and metrics](#theme-and-metrics).
 4. **Network work runs on the tokio runtime (`Io`), never on GPUI's executor.**
    See [Async: two runtimes](#async-two-runtimes).
-5. **Assets are picked up from their folder, never from a list.** Drop an SVG into an
-   `assets/icons/<pack>/` folder or a face into `assets/fonts/`; the build scripts walk the
-   directory. See [Icons](#icons).
+5. **Icons are picked up from their folder, never from a list.** Drop an SVG into an
+   `assets/icons/<pack>/` folder; the icon build script walks the directories. See [Icons](#icons).
 6. **Never push changes without the user's explicit confirmation.** Committing does not imply permission
    to run `git push`; ask immediately before every push.
 
@@ -307,8 +306,7 @@ is allowed to lag, the way a locale is: `icons::path` looks in the active pack, 
 - **Never register an icon by hand.** `crates/icons/build.rs` walks every folder with `embed::tree`
   and writes the registry, so dropping in a file is the whole job. `crates/embed` is the reusable
   half of that: `embed::folder(dir, kind)` and `embed::tree(dir, kind)` return the files, sorted,
-  and `embed::embedded` renders the `include_bytes!` table. Sonora's own build script uses it for
-  `assets/fonts`.
+  and `embed::embedded` renders the `include_bytes!` table.
 - `icons::packs()` is what the settings picker lists — `common` is not among them — and
   `Pack::title` is the folder id capitalised, so a new pack needs no Rust edit at all.
   `icons::SAMPLES` names the glyphs each entry previews with.
@@ -661,9 +659,9 @@ field in the title bar. Don't build a second search box.
 `.on_action(cx.listener(…))` (scoped). Key contexts: `Workspace`, `Input`, `Table`. Both `cmd-` and
 `ctrl-` bindings are registered for every shortcut.
 
-**Assets.** `crates/sonora/src/assets.rs` answers GPUI for both icons and fonts: icons come from
-the `icons` crate, fonts from a `FONTS` table its build script writes by walking `assets/fonts`.
-Neither is a hand-kept list any more — see [Icons](#icons). The UI font is Inter.
+**Assets.** `crates/sonora/src/assets.rs` answers GPUI for icons from the `icons` crate. The
+UI font is chosen through settings: `auto` asks GPUI for `.SystemUIFont`, and an explicit value
+asks for that family.
 
 **App icons are generated, never hand-edited.** `assets/icon.svg` is the master; `scripts/generate-icons.py`
 derives every platform artefact from it — a circle for `assets/linux/` (scalable SVG plus the hicolor
@@ -672,7 +670,7 @@ PNG set), an Apple squircle for `assets/macos/sonora.icns`, and a rounded rect f
 
 **`THIRD-PARTY.md` is generated too.** `scripts/generate-notices.py` drives `cargo about` over
 `about.toml` and writes the file; a new dependency means re-running it, not editing the output. The
-binary must ship it alongside `COPYING`, `assets/fonts/LICENSE.txt` and `assets/icons/LICENSE` —
+binary must ship it alongside `COPYING` and `assets/icons/LICENSE` —
 `flake.nix` and `.github/workflows/release.yml` both do that, and a package that skips it is
 distributing unlicensed code.
 

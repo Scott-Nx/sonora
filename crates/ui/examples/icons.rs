@@ -1,16 +1,9 @@
-use std::borrow::Cow;
-
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, Entity, EntityId, Pixels, ScrollHandle, SharedString, Window,
     WindowBounds, WindowOptions, div, px, size, svg,
 };
 use ui::{ActiveTheme as _, Look, Rounding, Scrollbar, Scroller, Text, Theme, ThemeKind, eyebrow};
-
-const INTER: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/fonts/Inter-Regular.ttf"
-));
 
 const FIRST_SIZE: gpui::Size<Pixels> = size(px(900.), px(720.));
 const GLYPH: Pixels = px(22.);
@@ -102,7 +95,6 @@ impl Render for Gallery {
             .size_full()
             .flex()
             .flex_col()
-            .font_family("Inter")
             .bg(theme.background)
             .text_color(theme.foreground)
             .text_size(theme.text(Text::Body))
@@ -128,10 +120,6 @@ fn main() {
     gpui_platform::application()
         .with_assets(icons::Assets)
         .run(|cx: &mut App| {
-            cx.text_system()
-                .add_fonts(vec![Cow::Borrowed(INTER)])
-                .expect("cannot load Inter");
-
             Theme::init(
                 Look {
                     kind: ThemeKind::Dark,

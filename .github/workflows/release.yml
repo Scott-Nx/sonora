@@ -191,10 +191,6 @@ jobs:
             THIRD-PARTY.md \
             Sonora.app/Contents/Resources/
 
-          cp \
-            assets/fonts/LICENSE.txt \
-            Sonora.app/Contents/Resources/LICENSE.Inter
-
           mkdir -p Sonora.app/Contents/Resources/icons
           cp assets/icons/LICENSE Sonora.app/Contents/Resources/icons/LICENSE
           for licence in assets/icons/*/LICENSE; do
@@ -272,7 +268,6 @@ jobs:
           mkdir -p licenses
           cp COPYING licenses/LICENSE
           cp THIRD-PARTY.md licenses/THIRD-PARTY.md
-          cp assets/fonts/LICENSE.txt licenses/LICENSE.Inter
           mkdir -p licenses/icons
           cp assets/icons/LICENSE licenses/icons/LICENSE
           for licence in assets/icons/*/LICENSE; do
