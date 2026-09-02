@@ -6,8 +6,7 @@ use std::process::Command;
 use crate::shared::local;
 use crate::shared::popups::{AccountPicker, BrowserPicker, SearchPopup, matches_query};
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Pixels, Render, SharedString, TextRun, Window,
-    div, font, px,
+    AnyElement, App, Context, Entity, FontWeight, Pixels, Render, SharedString, Window, div, px,
 };
 use gpui::{ScrollHandle, prelude::*, svg};
 use i18n::{Language, t};
@@ -1683,7 +1682,7 @@ fn open_settings_file(path: &Path) -> std::io::Result<()> {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.installed.is_none() {
-            self.installed = Some(usable_fonts(window, cx));
+            self.installed = Some(usable_fonts(cx));
         }
 
         let chosen_language = self.settings.read(cx).language();
@@ -1761,34 +1760,11 @@ impl Render for SettingsView {
     }
 }
 
-fn usable_fonts(window: &Window, cx: &App) -> Vec<SharedString> {
-    let missing = resolved(window, "sonora-has-no-such-family");
-    let mut names = cx.text_system().all_font_names();
-    names.sort_unstable();
-    names.dedup();
-
-    names
+fn usable_fonts(cx: &App) -> Vec<SharedString> {
+    cx.text_system()
+        .all_font_names()
         .into_iter()
         .filter(|name| !name.starts_with('.'))
-        .filter(|name| resolved(window, name) != missing)
         .map(SharedString::from)
         .collect()
-}
-
-fn resolved(window: &Window, family: &str) -> Option<gpui::FontId> {
-    let run = TextRun {
-        len: 1,
-        font: font(SharedString::from(family.to_owned())),
-        color: gpui::black(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-
-    window
-        .text_system()
-        .shape_line(SharedString::from("A"), px(12.), &[run], None)
-        .runs
-        .first()
-        .map(|run| run.font_id)
 }
