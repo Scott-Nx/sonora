@@ -1,6 +1,8 @@
 use std::{collections::HashMap, ops::Range};
+use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::prelude::*;
+use icu_segmenter::{LineSegmenter, options::LineBreakOptions};
 
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity, FontWeight,
@@ -76,7 +78,6 @@ const KARAOKE_FRAME: std::time::Duration =
     std::time::Duration::from_nanos(1_000_000_000 / KARAOKE_HZ as u64);
 const SWEEP_STRETCH: f32 = 1.4;
 const SWEPT: f32 = 0.98;
-const LANDING: f32 = 0.2;
 // what a lane row actually takes, plus the gaps between lanes
 const LANE_GAP_REM: f32 = 0.25;
 const LANE_SLACK: f32 = 0.25;
@@ -271,6 +272,8 @@ pub(crate) struct Aside {
     lyrics_wrap_size: Option<Pixels>,
     lyrics_wraps: HashMap<usize, Wrapped>,
     lane_rooms: HashMap<usize, Pixels>,
+    lane_plans: HashMap<usize, HashMap<usize, Wrapped>>,
+    plain_rows: Option<Vec<SharedString>>,
     seen: Pixels,
     flying: bool,
     flew: bool,
@@ -365,6 +368,8 @@ impl Aside {
             lyrics_wrap_size: None,
             lyrics_wraps: HashMap::new(),
             lane_rooms: HashMap::new(),
+            lane_plans: HashMap::new(),
+            plain_rows: None,
             seen: px(0.),
             flying: false,
             flew: true,
@@ -512,6 +517,8 @@ impl Aside {
     fn forget_measurements(&mut self) {
         self.lyrics_wraps.clear();
         self.lane_rooms.clear();
+        self.lane_plans.clear();
+        self.plain_rows = None;
         self.drifts.clear();
     }
 
@@ -1147,13 +1154,15 @@ impl Aside {
                     let primary_karaoke = karaoke && line.words.is_some();
                     if let std::collections::hash_map::Entry::Vacant(slot) =
                         self.lyrics_wraps.entry(index)
+                        && let Some(wrapped) = lyrics_wrap_rows(
+                            &line.text,
+                            line.words.as_deref(),
+                            wrap_size,
+                            wrap_width,
+                            window,
+                        )
                     {
-                        let parts = lyrics_parts(&line.text, line.words.as_deref());
-                        if let Some(wrapped) =
-                            lyrics_wrap_rows(&parts, wrap_size, wrap_width, window)
-                        {
-                            slot.insert(wrapped);
-                        }
+                        slot.insert(wrapped);
                     }
                     let wrapped = self.lyrics_wraps.get(&index);
                     let line_has_ended = active_line.is_some_and(|active| index < active)
@@ -1212,6 +1221,34 @@ impl Aside {
                         (_, _, true) => Some(("lane-out", self.departure, animations)),
                         _ => None,
                     };
+                    if fade.is_some() && sung.karaoke {
+                        let plans = self.lane_plans.entry(index).or_default();
+                        for (lane_index, lane) in line.secondary.iter().enumerate() {
+                            let Some(words) =
+                                lane.words.as_deref().filter(|words| !words.is_empty())
+                            else {
+                                continue;
+                            };
+                            plans.entry(lane_index).or_insert_with(|| {
+                                lyrics_wrap_rows(
+                                    &lane.text,
+                                    Some(words),
+                                    theme.text(Text::Body),
+                                    wrap_width,
+                                    window,
+                                )
+                                .unwrap_or_else(|| {
+                                    lyrics_plan(
+                                        &lane.text,
+                                        Some(words),
+                                        theme.text(Text::Body),
+                                        None,
+                                        window,
+                                    )
+                                })
+                            });
+                        }
+                    }
                     let room = fade.map(|_| match self.lane_rooms.get(&index) {
                         Some(room) => *room,
                         None => {
@@ -1222,49 +1259,58 @@ impl Aside {
                                 active_verse_size(verse) * ui::LEADING,
                                 wrap_width,
                                 window,
+                                self.lane_plans.get(&index),
                             );
                             self.lane_rooms.insert(index, room);
                             room
                         }
                     });
-                    let lanes =
-                        fade.zip(room).map(|((tag, take, animated), room)| {
-                            let arriving = tag == "lane-in";
-                            let group = div().flex().flex_col().gap_1().children(
-                                line.secondary.iter().map(|lane| {
-                                    let sung_by_end = line
-                                        .sung_end()
-                                        .is_some_and(|end| secondary_lane_started(lane, end));
-                                    secondary_lyrics_lane(
-                                        lane,
-                                        true,
-                                        line_has_ended,
-                                        position,
-                                        dimming.filter(|_| sung_by_end),
-                                        line.voice,
+                    let lanes = fade.zip(room).map(|((tag, take, animated), room)| {
+                        let arriving = tag == "lane-in";
+                        let group = div().flex().flex_col().gap_1().children(
+                            line.secondary.iter().enumerate().map(|(lane_index, lane)| {
+                                let plan = if sung.karaoke {
+                                    self.lane_plans
+                                        .get(&index)
+                                        .and_then(|plans| plans.get(&lane_index))
+                                } else {
+                                    None
+                                };
+                                let sung_by_end = line
+                                    .sung_end()
+                                    .is_some_and(|end| secondary_lane_started(lane, end));
+                                secondary_lyrics_lane(
+                                    lane,
+                                    true,
+                                    line_has_ended,
+                                    position,
+                                    SecondaryLaneLook {
+                                        dimming: dimming.filter(|_| sung_by_end),
+                                        voice: line.voice,
                                         sung,
-                                    )
-                                }),
-                            );
-                            match animated {
-                                true => group
-                                    .overflow_hidden()
-                                    .with_animation(
-                                        (tag, take as usize),
-                                        Animation::new(Motion::Base.span())
-                                            .with_easing(ease_in_out),
-                                        move |this, t| {
-                                            let shown = match arriving {
-                                                true => t,
-                                                false => 1. - t,
-                                            };
-                                            this.opacity(shown).max_h(room * shown)
-                                        },
-                                    )
-                                    .into_any_element(),
-                                false => group.into_any_element(),
-                            }
-                        });
+                                        plan,
+                                    },
+                                )
+                            }),
+                        );
+                        match animated {
+                            true => group
+                                .overflow_hidden()
+                                .with_animation(
+                                    (tag, take as usize),
+                                    Animation::new(Motion::Base.span()).with_easing(ease_in_out),
+                                    move |this, t| {
+                                        let shown = match arriving {
+                                            true => t,
+                                            false => 1. - t,
+                                        };
+                                        this.opacity(shown).max_h(room * shown)
+                                    },
+                                )
+                                .into_any_element(),
+                            false => group.into_any_element(),
+                        }
+                    });
                     let content = div()
                         .flex()
                         .flex_col()
@@ -1348,24 +1394,35 @@ impl Aside {
                 rendered
             }
             (None, LyricsState::Ready) => match &shown {
-                Some(music::Lyrics::Plain { text, romanized }) => vec![
-                    div()
-                        .w_full()
-                        .max_w(reach)
-                        .px_2()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .text_size(theme.text(Text::Body))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child(SharedString::from(text.clone()))
-                        .when_some(
-                            selected_romanization(romanized, romanization_scripts),
-                            |this, text| this.child(romanized_lyrics_lane(text, &theme)),
-                        )
-                        .into_any_element(),
-                ],
+                Some(music::Lyrics::Plain { text, romanized }) => {
+                    let rows = match &self.plain_rows {
+                        Some(rows) => rows.clone(),
+                        None => {
+                            let rows =
+                                plain_lyrics_rows(text, theme.text(Text::Body), wrap_width, window);
+                            self.plain_rows = Some(rows.clone());
+                            rows
+                        }
+                    };
+                    vec![
+                        div()
+                            .w_full()
+                            .max_w(reach)
+                            .px_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_size(theme.text(Text::Body))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .children(rows)
+                            .when_some(
+                                selected_romanization(romanized, romanization_scripts),
+                                |this, text| this.child(romanized_lyrics_lane(text, &theme)),
+                            )
+                            .into_any_element(),
+                    ]
+                }
                 _ => vec![wordless("lyrics-missing", "icons/mic-off.svg")],
             },
             (None, LyricsState::Idle) => vec![empty("lyrics-idle", cx)],
@@ -1797,25 +1854,6 @@ fn fixed_lyrics_lane(rows: &[SharedString], voice: Voice, sung: Sung) -> Div {
         }))
 }
 
-// a lane with no measured plan of its own, split on the spot
-fn loose_plan(line: &str, words: &[music::LyricsWord]) -> Wrapped {
-    let parts = karaoke_parts(line, words);
-    let fragments = parts
-        .iter()
-        .map(|(text, _)| SharedString::from(text.clone()))
-        .collect::<Vec<_>>();
-    let spoken = parts.iter().map(|(_, word)| *word).collect::<Vec<_>>();
-    Wrapped {
-        spans: Vec::new(),
-        evenly: evenly_filled(&fragments, &spoken),
-        fragments,
-        spoken,
-        rows: Vec::new(),
-        widths: Vec::new(),
-        text: Vec::new(),
-    }
-}
-
 fn karaoke_lane(
     plan: &Wrapped,
     line_start: std::time::Duration,
@@ -1827,23 +1865,12 @@ fn karaoke_lane(
 ) -> Div {
     let theme = &sung.theme;
     let edge_fade = verse * REVEAL;
-    let Wrapped {
-        fragments,
-        spoken,
-        evenly,
-        ..
-    } = plan;
     let windows = (0..words.len())
         .map(|word| {
             let (start, end) = karaoke_window(line_start, words, word);
             (start, end, word + 1 >= words.len())
         })
         .collect::<Vec<_>>();
-    let sweep = |word: usize| match (windows.get(word), evenly.get(word)) {
-        (Some(&(start, end, _)), Some(true)) => progress_between(start, end, position),
-        (Some(&(start, end, tail)), _) => swept(start, end, position, tail),
-        (None, _) => 0.,
-    };
     let lit = |text: SharedString, reveal: Reveal| {
         div()
             .relative()
@@ -1877,7 +1904,7 @@ fn karaoke_lane(
             .flex_col()
             .text_left()
             .children((0..plan.rows.len()).map(|row| {
-                let reveal = revealed(plan, row, &windows, position, edge_fade);
+                let reveal = revealed(plan, plan.rows[row].clone(), &windows, position, edge_fade);
                 lifted(
                     div()
                         .flex()
@@ -1891,18 +1918,12 @@ fn karaoke_lane(
             .flex_wrap()
             .text_left()
             .when(!voice.lead(), |this| this.justify_end())
-            .children((0..fragments.len()).map(|index| {
-                let share = sweep(spoken.get(index).copied().unwrap_or(index));
-                let reveal = Reveal {
-                    shown: share > 0.,
-                    width: None,
-                    share,
-                    landing: match share < 1. {
-                        true => ((1. - share) / LANDING).min(1.),
-                        false => 0.,
-                    },
-                };
-                lit(fragments[index].clone(), reveal)
+            .children((0..plan.units.len()).map(|index| {
+                let reveal = revealed(plan, index..index + 1, &windows, position, edge_fade);
+                let text = SharedString::from(
+                    plan.source.as_ref()[plan.units[index].range.clone()].to_owned(),
+                );
+                lit(text, reveal)
             })),
     }
 }
@@ -1917,42 +1938,43 @@ struct Reveal {
 
 fn revealed(
     plan: &Wrapped,
-    row: usize,
+    units: Range<usize>,
     windows: &[(std::time::Duration, std::time::Duration, bool)],
     position: std::time::Duration,
     fade: Pixels,
 ) -> Reveal {
     let mut front = px(0.);
     let mut offset = px(0.);
-    for index in plan.rows[row].clone() {
-        let mine = plan.widths.get(index).copied().unwrap_or(px(0.));
-        let word = plan.spoken.get(index).copied().unwrap_or(index);
-        let Some(&(start, end, last)) = windows.get(word) else {
-            offset += mine;
-            continue;
-        };
-
-        // a wide character or a phrase timed as one word fills at an even pace;
-        // the eased curve only reads as a flourish across Latin letters
-        let even = plan.evenly.get(word).copied().unwrap_or(false);
-        let share = match even {
-            true => progress_between(start, end, position),
-            false => swept(start, end, position, last),
-        };
-        if share > 0. {
-            // a word covering several fragments hands each its own slice of the
-            // sweep, and the edge follows whichever reaches furthest
-            let (before, whole) = plan.spans.get(index).copied().unwrap_or((px(0.), mine));
-            let part = match mine > px(0.) {
-                true => ((whole * share - before) / mine).clamp(0., 1.),
-                false => 0.,
+    for index in units {
+        let unit = &plan.units[index];
+        for part in &unit.parts {
+            let Some(&(start, end, last)) = windows.get(part.word) else {
+                continue;
             };
-            let reach = offset + mine * part;
-            if part > 0. && reach > front {
-                front = reach;
+
+            // A wide phrase fills evenly; the eased curve only reads as a flourish across Latin.
+            let even = plan.evenly.get(part.word).copied().unwrap_or(false);
+            let share = match even {
+                true => progress_between(start, end, position),
+                false => swept(start, end, position, last),
+            };
+            if share > 0. {
+                let whole = plan
+                    .word_widths
+                    .get(part.word)
+                    .copied()
+                    .unwrap_or(part.width);
+                let progress = match part.width > px(0.) {
+                    true => ((whole * share - part.before) / part.width).clamp(0., 1.),
+                    false => 0.,
+                };
+                let reach = offset + part.offset + part.width * progress;
+                if progress > 0. && reach > front {
+                    front = reach;
+                }
             }
         }
-        offset += mine;
+        offset += unit.width;
     }
 
     // The edge keeps one soft trail the whole way across a row, no wider than
@@ -1972,15 +1994,26 @@ fn revealed(
     }
 }
 
+struct SecondaryLaneLook<'a> {
+    dimming: Option<u64>,
+    voice: Voice,
+    sung: Sung,
+    plan: Option<&'a Wrapped>,
+}
+
 fn secondary_lyrics_lane(
     lane: &music::LyricsLane,
     line_active: bool,
     line_passed: bool,
     position: std::time::Duration,
-    dimming: Option<u64>,
-    voice: Voice,
-    sung: Sung,
+    look: SecondaryLaneLook<'_>,
 ) -> gpui::AnyElement {
+    let SecondaryLaneLook {
+        dimming,
+        voice,
+        sung,
+        plan,
+    } = look;
     let theme = &sung.theme;
     let passed = line_passed || lane.sung_end().is_some_and(|end| position >= end);
     let shade = |singing: bool| {
@@ -1999,20 +2032,15 @@ fn secondary_lyrics_lane(
     let tint = shade(line_active);
     let size = theme.text(Text::Body);
     let karaoke_capable = sung.karaoke && lane.worded();
-    let lyrics = div()
-        .text_size(size)
-        .map(|this| match (karaoke_capable, lane.words.as_ref()) {
-            (true, Some(words)) => this.child(karaoke_lane(
-                &loose_plan(&lane.text, words),
-                lane.start,
-                words,
-                position,
-                size,
-                voice,
-                sung,
-            )),
-            _ => this.child(SharedString::from(lane.text.clone())),
-        });
+    let lyrics =
+        div()
+            .text_size(size)
+            .map(|this| match (karaoke_capable, lane.words.as_ref(), plan) {
+                (true, Some(words), Some(plan)) => this.child(karaoke_lane(
+                    plan, lane.start, words, position, size, voice, sung,
+                )),
+                _ => this.child(SharedString::from(lane.text.clone())),
+            });
     let held = shade(true);
     let lyrics = match dimming {
         Some(departure) => lyrics
@@ -2085,87 +2113,6 @@ fn karaoke_window(
     (start, end)
 }
 
-#[cfg(test)]
-fn karaoke_fragments(line: &str, words: &[music::LyricsWord]) -> Vec<String> {
-    karaoke_parts(line, words)
-        .into_iter()
-        .map(|(text, _)| text)
-        .collect()
-}
-
-fn karaoke_parts(line: &str, words: &[music::LyricsWord]) -> Vec<(String, usize)> {
-    let mut starts = Vec::with_capacity(words.len());
-    let mut cursor = 0;
-    for word in words {
-        if word.text.is_empty() {
-            return spaced_words(words);
-        }
-        let Some(remainder) = line.get(cursor..) else {
-            return spaced_words(words);
-        };
-        let Some(relative) = remainder.find(&word.text) else {
-            return spaced_words(words);
-        };
-        let start = cursor + relative;
-        starts.push(start);
-        cursor = start + word.text.len();
-    }
-
-    starts
-        .iter()
-        .enumerate()
-        .flat_map(|(index, start)| {
-            let start = match index {
-                0 => 0,
-                _ => *start,
-            };
-            let end = starts.get(index + 1).copied().unwrap_or(line.len());
-            plain_lyrics_fragments(&line[start..end])
-                .into_iter()
-                .map(move |piece| (piece, index))
-        })
-        .collect()
-}
-
-fn spaced_words(words: &[music::LyricsWord]) -> Vec<(String, usize)> {
-    words
-        .iter()
-        .enumerate()
-        .flat_map(|(index, word)| {
-            let mut text = word.text.clone();
-            if words
-                .get(index + 1)
-                .is_some_and(|next| needs_space(&word.text, &next.text))
-            {
-                text.push(' ');
-            }
-            plain_lyrics_fragments(&text)
-                .into_iter()
-                .map(move |piece| (piece, index))
-        })
-        .collect()
-}
-
-fn needs_space(left: &str, right: &str) -> bool {
-    let Some(last) = left.chars().next_back() else {
-        return false;
-    };
-    let Some(first) = right.chars().next() else {
-        return false;
-    };
-    if last.is_whitespace() || first.is_whitespace() {
-        return false;
-    }
-    if wide(last) || wide(first) {
-        return false;
-    }
-    !matches!(last, '(' | '[' | '{' | '\'' | '’' | '-' | '—')
-        && !matches!(
-            first,
-            ')' | ']' | '}' | ',' | '.' | '!' | '?' | ';' | ':' | '%' | '\'' | '’' | '-' | '—'
-        )
-}
-
 /// How far along a transition started at this moment is, asking for frames while
 /// it runs.
 fn ramp(at: std::time::Instant, window: &mut Window) -> f32 {
@@ -2189,169 +2136,261 @@ fn active_verse_size(verse: Pixels) -> Pixels {
     verse + ACTIVE_VERSE_GROWTH
 }
 
-fn lyrics_parts(line: &str, words: Option<&[music::LyricsWord]>) -> Vec<(String, usize)> {
-    match words {
-        Some(words) if !words.is_empty() => karaoke_parts(line, words),
-        _ => plain_lyrics_fragments(line)
-            .into_iter()
-            .enumerate()
-            .map(|(index, piece)| (piece, index))
-            .collect(),
-    }
+#[derive(Clone)]
+struct TimingPart {
+    word: usize,
+    offset: Pixels,
+    before: Pixels,
+    width: Pixels,
 }
 
-fn plain_lyrics_fragments(line: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    let mut start = 0;
-    let mut spacing = false;
-    let mut previous = None;
-    for (index, letter) in line.char_indices() {
-        if letter.is_whitespace() {
-            spacing = true;
-        } else if spacing || previous.is_some_and(|previous| parts(previous, letter)) {
-            fragments.push(line[start..index].to_owned());
-            start = index;
-            spacing = false;
-        }
-        previous = Some(letter);
-    }
-    if start < line.len() {
-        fragments.push(line[start..].to_owned());
-    }
-    fragments
+#[derive(Clone)]
+struct VisualUnit {
+    range: Range<usize>,
+    width: Pixels,
+    parts: Vec<TimingPart>,
 }
 
-// everything a line needs to lay out and light up, measured once per width
+// Original text remains source of truth; units and rows only hold byte ranges into it.
 #[derive(Clone)]
 struct Wrapped {
-    fragments: Vec<SharedString>,
-    spoken: Vec<usize>,
+    source: SharedString,
+    units: Vec<VisualUnit>,
     rows: Vec<Range<usize>>,
-    widths: Vec<Pixels>,
-    spans: Vec<(Pixels, Pixels)>,
+    word_widths: Vec<Pixels>,
     evenly: Vec<bool>,
     text: Vec<SharedString>,
 }
 
 fn lyrics_wrap_rows(
-    parts: &[(String, usize)],
+    line: &str,
+    words: Option<&[music::LyricsWord]>,
     font_size: Pixels,
     width: Pixels,
     window: &mut Window,
 ) -> Option<Wrapped> {
-    if width <= px(0.) {
-        return None;
-    }
+    (width > px(0.)).then(|| lyrics_plan(line, words, font_size, Some(width), window))
+}
 
+fn lyrics_plan(
+    line: &str,
+    words: Option<&[music::LyricsWord]>,
+    font_size: Pixels,
+    width: Option<Pixels>,
+    window: &mut Window,
+) -> Wrapped {
     let mut style = window.text_style();
     style.font_weight = FontWeight::SEMIBOLD;
-    let fragments = parts
-        .iter()
-        .map(|(text, _)| SharedString::from(text.clone()))
-        .collect::<Vec<_>>();
-    let spoken = parts.iter().map(|(_, word)| *word).collect::<Vec<_>>();
-    // one shaped line per verse rather than one per fragment: a line of wide
-    // characters is a shaping call each otherwise, and the widths that come back
-    // this way also carry the kerning across a boundary
-    let whole = SharedString::from(
-        parts
-            .iter()
-            .map(|(text, _)| text.as_str())
-            .collect::<String>(),
-    );
-    let run = style.to_run(whole.len());
+    let source = SharedString::from(line.to_owned());
+    let run = style.to_run(source.len());
     let shaped = window
         .text_system()
-        .shape_line(whole, font_size, &[run], None);
-    let mut widths = Vec::with_capacity(parts.len());
-    let mut at = 0;
-    let mut left = shaped.x_for_index(0);
-    for (text, _) in parts {
-        at += text.len();
-        let right = shaped.x_for_index(at);
-        widths.push(right - left);
-        left = right;
-    }
-    let breaks = fragments
-        .iter()
-        .enumerate()
-        .map(|(index, fragment)| match index.checked_sub(1) {
-            Some(previous) => separable(&fragments[previous], fragment),
-            None => true,
-        })
-        .collect::<Vec<_>>();
-    let rows = wrap_fragment_widths(&widths, &breaks, width);
+        .shape_line(source.clone(), font_size, &[run], None);
+    let timing = words
+        .filter(|words| !words.is_empty())
+        .map(|words| timing_spans(line, words))
+        .unwrap_or_default();
+    let normal = normal_break_ranges(line);
+    let ranges = match width {
+        Some(width) => emergency_ranges(line, normal, width, |index| shaped.x_for_index(index)),
+        None => normal,
+    };
+    let measure = |index| shaped.x_for_index(index);
+    let (units, word_widths) = measured_units(ranges, &timing, &measure);
+    let rows = width
+        .map(|width| wrap_unit_widths(&units, width))
+        .unwrap_or_default();
     let text = rows
         .iter()
         .map(|row| {
-            SharedString::from(parts[row.clone()].iter().fold(
-                String::new(),
-                |mut whole, (piece, _)| {
-                    whole.push_str(piece);
-                    whole
-                },
-            ))
+            let start = units[row.start].range.start;
+            let end = units[row.end - 1].range.end;
+            SharedString::from(source.as_ref()[start..end].to_owned())
+        })
+        .collect::<Vec<_>>();
+    let evenly = evenly_timed(line, &timing, &units, timing.len());
+
+    Wrapped {
+        source,
+        units,
+        rows,
+        word_widths,
+        evenly,
+        text,
+    }
+}
+
+fn measured_units(
+    ranges: Vec<Range<usize>>,
+    timing: &[Range<usize>],
+    x_for_index: &impl Fn(usize) -> Pixels,
+) -> (Vec<VisualUnit>, Vec<Pixels>) {
+    let word_widths = timing
+        .iter()
+        .map(|span| x_for_index(span.end) - x_for_index(span.start))
+        .collect::<Vec<_>>();
+    let units = ranges
+        .into_iter()
+        .map(|range| {
+            let start_x = x_for_index(range.start);
+            let width = x_for_index(range.end) - start_x;
+            let parts = timing
+                .iter()
+                .enumerate()
+                .filter_map(|(word, span)| {
+                    let start = range.start.max(span.start);
+                    let end = range.end.min(span.end);
+                    (start < end).then(|| TimingPart {
+                        word,
+                        offset: x_for_index(start) - start_x,
+                        before: x_for_index(start) - x_for_index(span.start),
+                        width: x_for_index(end) - x_for_index(start),
+                    })
+                })
+                .collect();
+            VisualUnit {
+                range,
+                width,
+                parts,
+            }
         })
         .collect::<Vec<_>>();
 
-    Some(Wrapped {
-        spans: word_spans(&spoken, &widths),
-        evenly: evenly_filled(&fragments, &spoken),
-        fragments,
-        spoken,
-        rows,
-        widths,
-        text,
-    })
+    (units, word_widths)
 }
 
-// a fragment's own slice of the word it belongs to
-fn word_spans(spoken: &[usize], widths: &[Pixels]) -> Vec<(Pixels, Pixels)> {
-    let words = spoken.iter().copied().max().map_or(0, |last| last + 1);
-    let mut wholes = vec![px(0.); words];
-    for (index, word) in spoken.iter().enumerate() {
-        wholes[*word] += widths.get(index).copied().unwrap_or(px(0.));
+// Provider spans own timing only. They never supply line-break semantics.
+fn timing_spans(line: &str, words: &[music::LyricsWord]) -> Vec<Range<usize>> {
+    let mut starts = Vec::with_capacity(words.len());
+    let mut cursor = 0;
+    for word in words {
+        if word.text.is_empty() {
+            return approximate_timing_spans(line, words);
+        }
+        let Some(remainder) = line.get(cursor..) else {
+            return approximate_timing_spans(line, words);
+        };
+        let Some(relative) = remainder.find(&word.text) else {
+            return approximate_timing_spans(line, words);
+        };
+        let start = cursor + relative;
+        starts.push(start);
+        cursor = start + word.text.len();
     }
-    let mut befores = vec![px(0.); words];
-    spoken
+
+    starts
         .iter()
         .enumerate()
-        .map(|(index, word)| {
-            let before = befores[*word];
-            befores[*word] += widths.get(index).copied().unwrap_or(px(0.));
-            (before, wholes[*word])
+        .map(|(index, start)| {
+            let start = if index == 0 { 0 } else { *start };
+            let end = starts.get(index + 1).copied().unwrap_or(line.len());
+            start..end
         })
         .collect()
 }
 
-fn evenly_filled(fragments: &[SharedString], spoken: &[usize]) -> Vec<bool> {
-    let words = spoken.iter().copied().max().map_or(0, |last| last + 1);
-    let mut pieces = vec![0usize; words];
-    let mut broad = vec![false; words];
-    for (index, word) in spoken.iter().enumerate() {
-        pieces[*word] += 1;
-        broad[*word] |= fragments[index].chars().any(wide);
+// Mismatched provider text is rare after normalization. Keep original bytes and distribute
+// ownership over character boundaries so rendering stays lossless and safe.
+fn approximate_timing_spans(line: &str, words: &[music::LyricsWord]) -> Vec<Range<usize>> {
+    if words.is_empty() {
+        return Vec::new();
     }
-    pieces
-        .into_iter()
-        .zip(broad)
-        .map(|(pieces, broad)| pieces > 1 || broad)
+    let boundaries = line
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(line.len()))
+        .collect::<Vec<_>>();
+    let characters = boundaries.len() - 1;
+    let weights = words
+        .iter()
+        .map(|word| word.text.chars().count())
+        .collect::<Vec<_>>();
+    let total = weights.iter().sum::<usize>();
+    let mut consumed = 0usize;
+    let mut start = 0;
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            consumed += weights[index];
+            let target = if index + 1 == words.len() {
+                characters
+            } else {
+                consumed
+                    .saturating_mul(characters)
+                    .checked_div(total)
+                    .unwrap_or((index + 1) * characters / words.len())
+            };
+            let end = boundaries[target.min(characters)].max(start);
+            let span = start..end;
+            start = end;
+            span
+        })
         .collect()
 }
 
-fn separable(left: &str, right: &str) -> bool {
-    // spacing ends a row
-    if right.starts_with(char::is_whitespace) {
-        return false;
+fn normal_break_ranges(line: &str) -> Vec<Range<usize>> {
+    // ICU4X applies UAX #14/Kinsoku rules and dictionary data for Thai and the
+    // other complex scripts. Timing units never participate in this pass.
+    let mut offsets = LineSegmenter::new_dictionary(LineBreakOptions::default())
+        .segment_str(line)
+        .filter(|offset| line.is_char_boundary(*offset))
+        .collect::<Vec<_>>();
+    if offsets.first().copied() != Some(0) {
+        offsets.insert(0, 0);
     }
-    if left.ends_with(char::is_whitespace) {
-        return true;
+    if offsets.last().copied() != Some(line.len()) {
+        offsets.push(line.len());
     }
+    offsets.dedup();
+    offsets
+        .windows(2)
+        .filter_map(|pair| (pair[0] < pair[1]).then_some(pair[0]..pair[1]))
+        .collect()
+}
 
-    match (left.chars().next_back(), right.chars().next()) {
-        (Some(left), Some(right)) => parts(left, right),
-        _ => false,
+// Only an individually oversized normal segment may enter grapheme fallback.
+fn emergency_ranges(
+    line: &str,
+    normal: Vec<Range<usize>>,
+    width: Pixels,
+    x_for_index: impl Fn(usize) -> Pixels,
+) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    for range in normal {
+        if x_for_index(range.end) - x_for_index(range.start) <= width {
+            ranges.push(range);
+            continue;
+        }
+        let text = &line[range.clone()];
+        ranges.extend(text.grapheme_indices(true).map(|(at, cluster)| {
+            let start = range.start + at;
+            start..start + cluster.len()
+        }));
     }
+    ranges
+}
+
+fn evenly_timed(
+    line: &str,
+    timing: &[Range<usize>],
+    units: &[VisualUnit],
+    words: usize,
+) -> Vec<bool> {
+    let mut pieces = vec![0usize; words];
+    for unit in units {
+        for part in &unit.parts {
+            pieces[part.word] += 1;
+        }
+    }
+    (0..words)
+        .map(|word| {
+            pieces[word] > 1
+                || timing
+                    .get(word)
+                    .is_some_and(|range| line[range.clone()].chars().any(wide))
+        })
+        .collect()
 }
 
 fn wide(letter: char) -> bool {
@@ -2367,58 +2406,21 @@ fn wide(letter: char) -> bool {
     )
 }
 
-fn parts(left: char, right: char) -> bool {
-    if !wide(left) || !wide(right) {
-        return false;
-    }
-
-    !matches!(
-        right,
-        '、' | '。'
-            | '，'
-            | '．'
-            | '！'
-            | '？'
-            | '：'
-            | '；'
-            | '」'
-            | '』'
-            | '）'
-            | '】'
-            | '〉'
-            | '》'
-            | '〕'
-            | '・'
-            | 'ー'
-            | '…'
-            | '々'
-            | 'ゝ'
-            | 'ゞ'
-            | 'っ'
-            | 'ッ'
-    ) && !matches!(left, '「' | '『' | '（' | '【' | '〈' | '《' | '〔')
-}
-
-fn wrap_fragment_widths(widths: &[Pixels], breaks: &[bool], width: Pixels) -> Vec<Range<usize>> {
+fn wrap_unit_widths(units: &[VisualUnit], width: Pixels) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
     let mut start = 0;
     let mut used = px(0.);
 
-    for (index, fragment) in widths.iter().copied().enumerate() {
-        if index > start
-            && used + fragment > width
-            && let Some(split) = (start + 1..=index)
-                .rev()
-                .find(|at| breaks.get(*at).copied().unwrap_or(true))
-        {
-            rows.push(start..split);
-            used = widths[split..index].iter().copied().sum();
-            start = split;
+    for (index, unit) in units.iter().enumerate() {
+        if index > start && used + unit.width > width {
+            rows.push(start..index);
+            start = index;
+            used = px(0.);
         }
-        used += fragment;
+        used += unit.width;
     }
-    if start < widths.len() {
-        rows.push(start..widths.len());
+    if start < units.len() {
+        rows.push(start..units.len());
     }
     rows
 }
@@ -2518,11 +2520,16 @@ fn lanes_room(
     leading: Pixels,
     width: Pixels,
     window: &mut Window,
+    plans: Option<&HashMap<usize, Wrapped>>,
 ) -> Pixels {
     let rows = lanes
         .iter()
-        .map(|lane| {
-            let spoken = wrapped_rows(&lane.text, size, width, window);
+        .enumerate()
+        .map(|(lane_index, lane)| {
+            let spoken = plans.and_then(|plans| plans.get(&lane_index)).map_or_else(
+                || wrapped_rows(&lane.text, size, width, window),
+                |plan| plan.rows.len().max(1),
+            );
             let romanized = selected_romanization(&lane.romanized, scripts)
                 .map_or(0, |text| wrapped_rows(&text, size, width, window));
             spoken + romanized
@@ -2535,9 +2542,27 @@ fn lanes_room(
     leading * (rows as f32 + LANE_SLACK) + gaps
 }
 
+fn plain_lyrics_rows(
+    text: &str,
+    size: Pixels,
+    width: Pixels,
+    window: &mut Window,
+) -> Vec<SharedString> {
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        if line.is_empty() {
+            rows.push(SharedString::from(""));
+        } else if let Some(plan) = lyrics_wrap_rows(line, None, size, width, window) {
+            rows.extend(plan.text);
+        } else {
+            rows.push(SharedString::from(line.to_owned()));
+        }
+    }
+    rows
+}
+
 fn wrapped_rows(text: &str, size: Pixels, width: Pixels, window: &mut Window) -> usize {
-    let parts = lyrics_parts(text, None);
-    lyrics_wrap_rows(&parts, size, width, window).map_or(1, |wrapped| wrapped.rows.len().max(1))
+    lyrics_wrap_rows(text, None, size, width, window).map_or(1, |wrapped| wrapped.rows.len().max(1))
 }
 
 // culling needs layout
@@ -2672,16 +2697,49 @@ fn wordless(key: &'static str, icon: &'static str) -> gpui::AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{ops::Range, time::Duration};
+
+    use unicode_segmentation::UnicodeSegmentation;
 
     use music::{LyricsLane, LyricsLine, LyricsWord, Voice};
 
     use super::{
-        QueuePosition, Sections, Slot, active_lyrics_row, anchored_lyrics_offset,
-        karaoke_fragments, karaoke_window, lag_spring, line_has_passed, line_row, lyric_row_count,
-        plain_lyrics_fragments, secondary_karaoke_visible, wrap_fragment_widths,
+        QueuePosition, Sections, Slot, VisualUnit, active_lyrics_row, anchored_lyrics_offset,
+        emergency_ranges, karaoke_window, lag_spring, line_has_passed, line_row, lyric_row_count,
+        measured_units, normal_break_ranges, secondary_karaoke_visible, timing_spans,
+        wrap_unit_widths,
     };
-    use gpui::px;
+    use gpui::{Pixels, px};
+
+    fn test_units(widths: &[Pixels]) -> Vec<VisualUnit> {
+        widths
+            .iter()
+            .map(|&width| VisualUnit {
+                range: 0..0,
+                width,
+                parts: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn segments(text: &str) -> Vec<&str> {
+        normal_break_ranges(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect()
+    }
+
+    fn timed_words(parts: &[&str]) -> Vec<LyricsWord> {
+        parts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| LyricsWord {
+                start: Duration::from_millis(index as u64 * 100),
+                end: Duration::from_millis(index as u64 * 100 + 100),
+                text: (*text).to_owned(),
+            })
+            .collect()
+    }
 
     fn slots(sections: Sections) -> Vec<Slot> {
         (0..sections.len()).map(|i| sections.slot(i)).collect()
@@ -2865,7 +2923,7 @@ mod tests {
     }
 
     #[test]
-    fn karaoke_uses_spacing_from_the_complete_line() {
+    fn timing_spans_keep_original_spacing() {
         let text = "I said oooh I'm drowning in the night";
         let words = ["I", "said", "oooh", "I'm", "drowning", "in", "the", "night"]
             .into_iter()
@@ -2877,11 +2935,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let fragments = karaoke_fragments(text, &words);
-
-        assert_eq!(fragments.concat(), text);
+        let spans = timing_spans(text, &words);
         assert_eq!(
-            fragments,
+            spans
+                .iter()
+                .map(|range| &text[range.clone()])
+                .collect::<Vec<_>>(),
             [
                 "I ",
                 "said ",
@@ -2896,25 +2955,60 @@ mod tests {
     }
 
     #[test]
-    fn plain_lyrics_keep_spacing_in_breakable_fragments() {
-        let fragments = plain_lyrics_fragments("Ладони полны слёзок, но время");
+    fn normal_breaking_keeps_original_text() {
+        let text = "Ладони полны слёзок, но время";
+        let ranges = normal_break_ranges(text);
 
-        assert_eq!(fragments.concat(), "Ладони полны слёзок, но время");
-        assert_eq!(fragments, ["Ладони ", "полны ", "слёзок, ", "но ", "время"]);
+        assert_eq!(ranges.first().map(|range| range.start), Some(0));
+        assert_eq!(ranges.last().map(|range| range.end), Some(text.len()));
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| &text[range.clone()])
+                .collect::<Vec<_>>(),
+            ["Ладони ", "полны ", "слёзок, ", "но ", "время"]
+        );
     }
 
     #[test]
-    fn lyrics_wrap_at_the_active_size_plan() {
-        let rows = wrap_fragment_widths(&[px(40.), px(35.), px(30.), px(20.)], &[true; 4], px(80.));
-
-        assert_eq!(rows, [0..2, 2..4]);
-    }
-
-    #[test]
-    fn lyrics_keep_an_oversized_fragment_on_its_own_row() {
-        let rows = wrap_fragment_widths(&[px(120.), px(30.), px(30.)], &[true; 3], px(80.));
+    fn lyrics_wrap_only_at_normal_unit_boundaries() {
+        let units = test_units(&[px(60.), px(30.), px(20.)]);
+        let rows = wrap_unit_widths(&units, px(80.));
 
         assert_eq!(rows, [0..1, 1..3]);
+    }
+
+    #[test]
+    fn lyrics_keep_an_oversized_unit_on_its_own_row() {
+        let rows = wrap_unit_widths(&test_units(&[px(120.), px(30.), px(30.)]), px(80.));
+
+        assert_eq!(rows, [0..1, 1..3]);
+    }
+
+    #[test]
+    fn timing_parts_can_cross_a_wrapped_row() {
+        let timing = [0..2, 2..5, 5..6];
+        let (units, widths) = measured_units(vec![0..3, 3..6], &timing, &|index| px(index as f32));
+
+        assert_eq!(widths, [px(2.), px(3.), px(1.)]);
+        assert_eq!(
+            units[0]
+                .parts
+                .iter()
+                .map(|part| part.word)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(
+            units[1]
+                .parts
+                .iter()
+                .map(|part| part.word)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(units[1].parts[0].before, px(1.));
+        assert_eq!(wrap_unit_widths(&units, px(3.)), [0..1, 1..2]);
     }
 
     #[test]
@@ -3000,5 +3094,176 @@ mod tests {
         };
 
         assert!(line_has_passed(&line, Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn thai_normal_breaks_ignore_timing_granularity() {
+        let text = "เข้าใจสักที";
+        let expected = ["เข้าใจ", "สัก", "ที"];
+        let granularities = [
+            ["เข้า", "ใจ", "สั", "ก", "ที"].as_slice(),
+            ["เข้าใจ", "สัก", "ที"].as_slice(),
+            ["เข้าใจสักที"].as_slice(),
+        ];
+
+        assert_eq!(segments(text), expected);
+        for parts in granularities {
+            let words = timed_words(parts);
+            let spans = timing_spans(text, &words);
+            let (units, _) =
+                measured_units(normal_break_ranges(text), &spans, &|index| px(index as f32));
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|range| &text[range.clone()])
+                    .collect::<Vec<_>>(),
+                parts
+            );
+            assert_eq!(wrap_unit_widths(&units, px(20.)), [0..1, 1..3]);
+        }
+    }
+
+    #[test]
+    fn mismatched_timing_still_owns_the_original_line() {
+        let text = "เข้าใจสักที";
+        let words = timed_words(&["เข้าใจ", "missing"]);
+        let spans = timing_spans(text, &words);
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|range| &text[range.clone()])
+                .collect::<String>(),
+            text
+        );
+        assert!(spans.iter().all(|range| {
+            text.is_char_boundary(range.start) && text.is_char_boundary(range.end)
+        }));
+    }
+
+    #[test]
+    fn required_thai_phrases_use_dictionary_boundaries() {
+        for (text, expected) in [
+            (
+                "ฉันรักเธอมากที่สุด",
+                ["ฉัน", "รัก", "เธอ", "มาก", "ที่สุด"].as_slice(),
+            ),
+            ("กรุงเทพมหานคร", ["กรุงเทพมหานคร"].as_slice()),
+            (
+                "อยากให้เข้าใจกันสักที",
+                ["อยาก", "ให้", "เข้าใจ", "กัน", "สัก", "ที"].as_slice(),
+            ),
+            ("ประเทศไทย", ["ประเทศไทย"].as_slice()),
+        ] {
+            assert_eq!(segments(text), expected);
+        }
+    }
+
+    #[test]
+    fn provider_grapheme_splits_do_not_create_normal_breaks() {
+        for (text, parts) in [
+            ("สัก", ["ส", "ั", "ก"].as_slice()),
+            ("ที่", ["ท", "ี่"].as_slice()),
+        ] {
+            let words = timed_words(parts);
+            let spans = timing_spans(text, &words);
+            let normal = normal_break_ranges(text);
+            let normal_offsets = normal
+                .iter()
+                .flat_map(|range| [range.start, range.end])
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|range| &text[range.clone()])
+                    .collect::<Vec<_>>(),
+                parts
+            );
+            assert_eq!(segments(text), [text]);
+            assert!(
+                spans
+                    .iter()
+                    .skip(1)
+                    .all(|range| !normal_offsets.contains(&range.start))
+            );
+        }
+    }
+
+    #[test]
+    fn emergency_ranges_split_only_the_oversized_normal_unit() {
+        let text = "a bbbbb c";
+        let normal = normal_break_ranges(text);
+        let ranges = emergency_ranges_for_test(text, normal.clone(), px(3.));
+        let pieces = ranges
+            .iter()
+            .map(|range| &text[range.clone()])
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            normal
+                .iter()
+                .map(|range| &text[range.clone()])
+                .collect::<Vec<_>>(),
+            ["a ", "bbbbb ", "c"]
+        );
+        assert_eq!(pieces.first(), Some(&"a "));
+        assert_eq!(pieces.last(), Some(&"c"));
+        assert_eq!(pieces[1..pieces.len() - 1].concat(), "bbbbb ");
+        assert!(pieces.len() > normal.len());
+    }
+
+    #[test]
+    fn emergency_ranges_preserve_extended_graphemes() {
+        for text in ["สัก", "ที่", "มากๆ", "กรุงเทพฯ"] {
+            let normal = normal_break_ranges(text);
+            let ranges = emergency_ranges_for_test(text, normal, px(1.));
+            let expected = text
+                .grapheme_indices(true)
+                .map(|(at, cluster)| at..at + cluster.len())
+                .collect::<Vec<_>>();
+
+            assert_eq!(ranges, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn cjk_and_kinsoku_boundaries_survive() {
+        assert_eq!(segments("你好世界"), ["你", "好", "世", "界"]);
+        assert_eq!(segments("「你好」"), ["「你", "好」"]);
+
+        for text in [
+            "いゝ", "いゞ", "イヽ", "イヾ", "あっ", "アッ", "日々", "あー", "あ…", "あ、", "あ。",
+        ] {
+            assert_eq!(segments(text), [text], "{text}");
+        }
+    }
+
+    #[test]
+    fn mixed_script_breaks_reconstruct_the_source() {
+        for text in ["Sonora เพลงดีมาก", "เพลงดีมาก Sonora", "Hello世界 เพลง"]
+        {
+            let ranges = normal_break_ranges(text);
+            assert_eq!(ranges.first().map(|range| range.start), Some(0));
+            assert_eq!(ranges.last().map(|range| range.end), Some(text.len()));
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|range| &text[range.clone()])
+                    .collect::<String>(),
+                text
+            );
+            assert!(ranges.iter().all(
+                |range| text.is_char_boundary(range.start) && text.is_char_boundary(range.end)
+            ));
+        }
+    }
+
+    fn emergency_ranges_for_test(
+        text: &str,
+        normal: Vec<Range<usize>>,
+        width: Pixels,
+    ) -> Vec<Range<usize>> {
+        emergency_ranges(text, normal, width, |index| px(index as f32))
     }
 }

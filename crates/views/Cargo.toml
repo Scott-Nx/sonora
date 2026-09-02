@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 gpui.workspace = true
+icu_segmenter.workspace = true
 i18n.workspace = true
 icons.workspace = true
 jiff.workspace = true
@@ -14,3 +15,4 @@ input.workspace = true
 router.workspace = true
 ui.workspace = true
 state.workspace = true
+unicode-segmentation.workspace = true
