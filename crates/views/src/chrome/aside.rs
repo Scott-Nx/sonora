@@ -9,7 +9,7 @@ use gpui::{
     DragMoveEvent, Element, Entity, FontWeight, GlobalElementId, Hsla, InspectorElementId,
     LayoutId, LineLayout, MouseDownEvent, Pixels, Point, Render, ScrollHandle, ScrollStrategy,
     ScrollWheelEvent, ShapedLine, SharedString, SpringConfig, SpringState, Style, Task, TextAlign,
-    UniformListScrollHandle, Window, div, ease_in_out, point, px, size, svg, uniform_list,
+    UniformListScrollHandle, Window, div, ease_in_out, point, px, svg, uniform_list,
 };
 use i18n::t;
 use music::{Track, Voice};
@@ -20,8 +20,8 @@ use state::{
 };
 use ui::{
     ActiveTheme as _, Button, Card, DraggedPin, Edge, Motion, Motioned as _, Pin, Pinnable as _,
-    Popup, Scrollbar, Scroller, Spot, Text, Vacancy, drop_gap, drop_marker, ease_out_cubic,
-    ease_out_expo, eyebrow, faint, mix, snapped, vacant,
+    Popup, Scrollbar, Scroller, Spot, Text, Vacancy, drop_gap, drop_marker, ease_out_expo, eyebrow,
+    faint, mix, snapped, vacant,
 };
 
 use crate::chrome::{Chrome, section_label};
@@ -76,7 +76,6 @@ const SWEEP_LEAST: std::time::Duration = std::time::Duration::from_millis(180);
 const KARAOKE_HZ: u32 = 45;
 const KARAOKE_FRAME: std::time::Duration =
     std::time::Duration::from_nanos(1_000_000_000 / KARAOKE_HZ as u64);
-const SWEEP_STRETCH: f32 = 1.4;
 // what a lane row actually takes, plus the gaps between lanes
 const LANE_GAP_REM: f32 = 0.25;
 const LANE_SLACK: f32 = 0.25;
@@ -1868,10 +1867,7 @@ fn karaoke_lane(
 ) -> Div {
     let theme = &sung.theme;
     let windows = (0..words.len())
-        .map(|word| {
-            let (start, end) = karaoke_window(words, word);
-            (start, end, word + 1 >= words.len())
-        })
+        .map(|word| karaoke_window(words, word))
         .collect::<Vec<_>>();
     let lit = |shape: ShapedLine, reveal: Vec<RevealRange>| {
         KaraokeText::new(shape, reveal, theme.foreground)
@@ -2022,17 +2018,14 @@ impl Element for KaraokeText {
         )
         .ok();
 
+        let parent_mask = window.content_mask();
+        let line_width = self.line.width();
         for range in self.ranges.iter().copied() {
             if range.end <= range.start {
                 continue;
             }
 
-            let mask = ContentMask {
-                bounds: Bounds::new(
-                    point(bounds.origin.x + range.start, bounds.origin.y),
-                    size(range.end - range.start, bounds.size.height),
-                ),
-            };
+            let mask = reveal_mask(parent_mask, bounds.origin.x, line_width, range);
 
             window.with_content_mask(Some(mask), |window| {
                 LineLayout::paint(
@@ -2051,7 +2044,29 @@ impl Element for KaraokeText {
     }
 }
 
-#[derive(Clone, Copy)]
+fn reveal_mask(
+    parent: ContentMask<Pixels>,
+    origin_x: Pixels,
+    line_width: Pixels,
+    range: RevealRange,
+) -> ContentMask<Pixels> {
+    let left = match range.start <= px(0.) {
+        true => parent.bounds.left(),
+        false => origin_x + range.start,
+    };
+    let right = match range.end >= line_width {
+        true => parent.bounds.right(),
+        false => origin_x + range.end,
+    };
+    ContentMask {
+        bounds: Bounds::from_corners(
+            point(left, parent.bounds.top()),
+            point(right, parent.bounds.bottom()),
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct RevealRange {
     start: Pixels,
     end: Pixels,
@@ -2060,7 +2075,7 @@ struct RevealRange {
 fn revealed(
     plan: &Wrapped,
     units: Range<usize>,
-    windows: &[(std::time::Duration, std::time::Duration, bool)],
+    windows: &[(std::time::Duration, std::time::Duration)],
     position: std::time::Duration,
 ) -> Vec<RevealRange> {
     let mut ranges: Vec<(Pixels, Pixels)> = Vec::new();
@@ -2068,16 +2083,11 @@ fn revealed(
     for index in units {
         let unit = &plan.units[index];
         for part in &unit.parts {
-            let Some(&(start, end, last)) = windows.get(part.word) else {
+            let Some(&(start, end)) = windows.get(part.word) else {
                 continue;
             };
 
-            // A wide phrase fills evenly; the eased curve only reads as a flourish across Latin.
-            let even = plan.evenly.get(part.word).copied().unwrap_or(false);
-            let share = match even {
-                true => progress_between(start, end, position),
-                false => swept(start, end, position, last),
-            };
+            let share = progress_between(start, end, position);
             if share > 0. {
                 let whole = plan
                     .word_widths
@@ -2268,7 +2278,6 @@ struct Wrapped {
     units: Vec<VisualUnit>,
     rows: Vec<Range<usize>>,
     word_widths: Vec<Pixels>,
-    evenly: Vec<bool>,
     text: Vec<SharedString>,
     shapes: Vec<ShapedLine>,
 }
@@ -2334,13 +2343,11 @@ fn lyrics_plan(
             })
             .collect(),
     };
-    let evenly = evenly_timed(line, &timing, &units, timing.len());
 
     Wrapped {
         units,
         rows,
         word_widths,
-        evenly,
         text,
         shapes,
     }
@@ -2503,41 +2510,6 @@ fn emergency_ranges(
     ranges
 }
 
-fn evenly_timed(
-    line: &str,
-    timing: &[Range<usize>],
-    units: &[VisualUnit],
-    words: usize,
-) -> Vec<bool> {
-    let mut pieces = vec![0usize; words];
-    for unit in units {
-        for part in &unit.parts {
-            pieces[part.word] += 1;
-        }
-    }
-    (0..words)
-        .map(|word| {
-            pieces[word] > 1
-                || timing
-                    .get(word)
-                    .is_some_and(|range| line[range.clone()].chars().any(wide))
-        })
-        .collect()
-}
-
-fn wide(letter: char) -> bool {
-    matches!(letter,
-        '\u{2E80}'..='\u{303E}'
-        | '\u{3041}'..='\u{33FF}'
-        | '\u{3400}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{9FFF}'
-        | '\u{A000}'..='\u{A4CF}'
-        | '\u{AC00}'..='\u{D7AF}'
-        | '\u{F900}'..='\u{FAFF}'
-        | '\u{FF00}'..='\u{FF60}'
-    )
-}
-
 fn wrap_unit_widths(units: &[VisualUnit], width: Pixels) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
     let mut start = 0;
@@ -2562,33 +2534,12 @@ fn anchored_lyrics_offset(view: Pixels, item: Pixels, height: Pixels, reach: Pix
     delta.clamp(-reach, px(0.))
 }
 
-fn swept(
-    start: std::time::Duration,
-    end: std::time::Duration,
-    position: std::time::Duration,
-    tail: bool,
-) -> f32 {
-    let span = end.saturating_sub(start);
-    let progress = match span.is_zero() {
-        true => progress_between(start, start + SWEEP_LEAST, position),
-        false => {
-            let stretch = match tail {
-                true => 1.,
-                false => SWEEP_STRETCH,
-            };
-            let endpoint = ease_out_cubic((1. / stretch).min(1.));
-            ease_out_cubic((progress_between(start, end, position) / stretch).min(1.)) / endpoint
-        }
-    };
-    progress.clamp(0., 1.)
-}
-
 fn progress_between(
     start: std::time::Duration,
     end: std::time::Duration,
     position: std::time::Duration,
 ) -> f32 {
-    if position < start {
+    if position <= start {
         return 0.;
     }
     if position >= end {
@@ -2839,12 +2790,13 @@ mod tests {
     use music::{LyricsLane, LyricsLine, LyricsWord, Voice};
 
     use super::{
-        QueuePosition, Sections, Slot, TimingPart, VisualUnit, Wrapped, active_lyrics_row,
-        anchored_lyrics_offset, emergency_ranges, karaoke_window, lag_spring, line_has_passed,
-        line_row, lyric_row_count, measured_units, normal_break_ranges, revealed,
-        secondary_karaoke_visible, swept, timing_spans, wrap_unit_widths,
+        QueuePosition, RevealRange, Sections, Slot, TimingPart, VisualUnit, Wrapped,
+        active_lyrics_row, anchored_lyrics_offset, emergency_ranges, karaoke_window, lag_spring,
+        line_has_passed, line_row, lyric_row_count, measured_units, normal_break_ranges,
+        progress_between, reveal_mask, revealed, secondary_karaoke_visible, timing_spans,
+        wrap_unit_widths,
     };
-    use gpui::{Pixels, SharedString, px};
+    use gpui::{Bounds, ContentMask, Pixels, SharedString, point, px};
 
     fn test_units(widths: &[Pixels]) -> Vec<VisualUnit> {
         widths
@@ -2902,7 +2854,6 @@ mod tests {
             ],
             rows: std::iter::once(0..2).collect(),
             word_widths: vec![px(10.), px(10.)],
-            evenly: vec![true, true],
             text: vec![SharedString::from("AA BB")],
             shapes: Vec::new(),
         }
@@ -3211,11 +3162,7 @@ mod tests {
             (Duration::from_millis(1500), Duration::from_millis(1900))
         );
         let plan = reveal_plan();
-        let windows = [(
-            Duration::from_millis(1500),
-            Duration::from_millis(1900),
-            true,
-        )];
+        let windows = [(Duration::from_millis(1500), Duration::from_millis(1900))];
         assert!(revealed(&plan, 0..1, &windows, Duration::from_millis(1499)).is_empty());
     }
 
@@ -3270,49 +3217,123 @@ mod tests {
     }
 
     #[test]
-    fn positive_sweep_ends_at_provider_end() {
+    fn positive_duration_progress_is_linear() {
+        let start = Duration::from_millis(1000);
+        let end = Duration::from_millis(2000);
+
         assert_eq!(
-            swept(
-                Duration::from_millis(1000),
-                Duration::from_millis(1100),
-                Duration::from_millis(1100),
-                false,
-            ),
-            1.
+            progress_between(start, end, Duration::from_millis(999)),
+            0.0
         );
         assert_eq!(
-            swept(
-                Duration::from_millis(1000),
-                Duration::from_millis(10_000),
-                Duration::from_millis(10_000),
-                false,
-            ),
-            1.
+            progress_between(start, end, Duration::from_millis(1000)),
+            0.0
         );
-        assert!(
-            swept(
-                Duration::from_millis(1500),
-                Duration::from_millis(2500),
-                Duration::from_millis(2250),
-                true,
-            ) < 1.
+        assert_eq!(
+            progress_between(start, end, Duration::from_millis(1250)),
+            0.25
         );
+        assert_eq!(
+            progress_between(start, end, Duration::from_millis(1500)),
+            0.5
+        );
+        assert_eq!(
+            progress_between(start, end, Duration::from_millis(1750)),
+            0.75
+        );
+        assert_eq!(
+            progress_between(start, end, Duration::from_millis(2000)),
+            1.0
+        );
+        assert_eq!(
+            progress_between(start, end, Duration::from_millis(2500)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn sequential_words_join_continuously_at_boundary() {
+        let a_start = Duration::from_millis(1000);
+        let a_end = Duration::from_millis(1500);
+        let b_start = Duration::from_millis(1500);
+        let b_end = Duration::from_millis(2000);
+
+        let boundary = Duration::from_millis(1500);
+        assert_eq!(progress_between(a_start, a_end, boundary), 1.0);
+        assert_eq!(progress_between(b_start, b_end, boundary), 0.0);
+    }
+
+    #[test]
+    fn reveal_mask_geometry_rules() {
+        let parent = ContentMask {
+            bounds: Bounds::from_corners(point(px(10.), px(20.)), point(px(200.), px(100.))),
+        };
+        let origin_x = px(100.);
+        let line_width = px(50.);
+
+        let interior = reveal_mask(
+            parent,
+            origin_x,
+            line_width,
+            RevealRange {
+                start: px(20.),
+                end: px(40.),
+            },
+        );
+        assert_eq!(interior.bounds.left(), px(120.));
+        assert_eq!(interior.bounds.right(), px(140.));
+        assert_eq!(interior.bounds.top(), px(20.));
+        assert_eq!(interior.bounds.bottom(), px(100.));
+
+        let starts_at_edge = reveal_mask(
+            parent,
+            origin_x,
+            line_width,
+            RevealRange {
+                start: px(0.),
+                end: px(40.),
+            },
+        );
+        assert_eq!(starts_at_edge.bounds.left(), px(10.));
+        assert_eq!(starts_at_edge.bounds.right(), px(140.));
+        assert_eq!(starts_at_edge.bounds.top(), px(20.));
+        assert_eq!(starts_at_edge.bounds.bottom(), px(100.));
+
+        let terminal_complete = reveal_mask(
+            parent,
+            origin_x,
+            line_width,
+            RevealRange {
+                start: px(30.),
+                end: px(50.),
+            },
+        );
+        assert_eq!(terminal_complete.bounds.left(), px(130.));
+        assert_eq!(terminal_complete.bounds.right(), px(200.));
+        assert_eq!(terminal_complete.bounds.top(), px(20.));
+        assert_eq!(terminal_complete.bounds.bottom(), px(100.));
+
+        let row_complete = reveal_mask(
+            parent,
+            origin_x,
+            line_width,
+            RevealRange {
+                start: px(0.),
+                end: px(50.),
+            },
+        );
+        assert_eq!(row_complete.bounds.left(), px(10.));
+        assert_eq!(row_complete.bounds.right(), px(200.));
+        assert_eq!(row_complete.bounds.top(), px(20.));
+        assert_eq!(row_complete.bounds.bottom(), px(100.));
     }
 
     #[test]
     fn overlapping_reveal_ranges_do_not_fill_the_gap() {
         let plan = reveal_plan();
         let windows = [
-            (
-                Duration::from_millis(1000),
-                Duration::from_millis(2000),
-                false,
-            ),
-            (
-                Duration::from_millis(1500),
-                Duration::from_millis(2500),
-                true,
-            ),
+            (Duration::from_millis(1000), Duration::from_millis(2000)),
+            (Duration::from_millis(1500), Duration::from_millis(2500)),
         ];
         let reveal = revealed(
             &plan,
@@ -3332,16 +3353,8 @@ mod tests {
     fn sequential_reveal_ranges_still_join_continuously() {
         let plan = reveal_plan();
         let windows = [
-            (
-                Duration::from_millis(1000),
-                Duration::from_millis(1500),
-                false,
-            ),
-            (
-                Duration::from_millis(1500),
-                Duration::from_millis(2000),
-                true,
-            ),
+            (Duration::from_millis(1000), Duration::from_millis(1500)),
+            (Duration::from_millis(1500), Duration::from_millis(2000)),
         ];
         let reveal = revealed(
             &plan,
