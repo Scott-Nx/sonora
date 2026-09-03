@@ -291,8 +291,7 @@ impl LyricsLine {
         let primary = self
             .words
             .as_ref()
-            .and_then(|words| words.iter().rev().find(|word| !word.text.trim().is_empty()))
-            .map(|word| word.end.max(word.start).max(self.start))
+            .and_then(|words| latest_word_end(words, self.start))
             .or(self.end);
         self.secondary
             .iter()
@@ -322,10 +321,17 @@ impl LyricsLane {
     pub fn sung_end(&self) -> Option<Duration> {
         self.words
             .as_ref()
-            .and_then(|words| words.iter().rev().find(|word| !word.text.trim().is_empty()))
-            .map(|word| word.end.max(word.start).max(self.start))
+            .and_then(|words| latest_word_end(words, self.start))
             .or(self.end)
     }
+}
+
+fn latest_word_end(words: &[LyricsWord], start: Duration) -> Option<Duration> {
+    words
+        .iter()
+        .filter(|word| !word.text.trim().is_empty())
+        .map(|word| word.end.max(word.start).max(start))
+        .max()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,4 +418,77 @@ pub struct LyricsHit {
     pub album: Option<String>,
     pub duration: Option<Duration>,
     pub writers: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(start: u64, end: u64, text: &str) -> LyricsWord {
+        LyricsWord {
+            start: Duration::from_millis(start),
+            end: Duration::from_millis(end),
+            text: text.to_owned(),
+        }
+    }
+
+    fn lane(words: Vec<LyricsWord>) -> LyricsLane {
+        LyricsLane {
+            start: Duration::from_secs(1),
+            end: Some(Duration::from_secs(9)),
+            text: "lane".to_owned(),
+            romanized: None,
+            words: Some(words),
+        }
+    }
+
+    fn line(
+        words: Option<Vec<LyricsWord>>,
+        secondary: Vec<LyricsLane>,
+        end: Option<Duration>,
+    ) -> LyricsLine {
+        LyricsLine {
+            start: Duration::from_secs(1),
+            end,
+            text: "line".to_owned(),
+            romanized: None,
+            words,
+            secondary,
+            voice: Voice::Lead,
+        }
+    }
+
+    #[test]
+    fn lane_sung_end_uses_latest_word_end() {
+        assert_eq!(
+            lane(vec![word(1000, 3000, "A"), word(2000, 2500, "B")]).sung_end(),
+            Some(Duration::from_millis(3000))
+        );
+    }
+
+    #[test]
+    fn line_sung_end_uses_latest_primary_word_end() {
+        assert_eq!(
+            line(
+                Some(vec![word(1000, 3000, "A"), word(2000, 2500, "B")]),
+                Vec::new(),
+                Some(Duration::from_secs(9)),
+            )
+            .sung_end(),
+            Some(Duration::from_millis(3000))
+        );
+    }
+
+    #[test]
+    fn line_sung_end_includes_a_secondary_lane_that_outlives_primary() {
+        assert_eq!(
+            line(
+                Some(vec![word(1000, 3000, "A")]),
+                vec![lane(vec![word(2000, 4000, "echo")])],
+                Some(Duration::from_secs(1)),
+            )
+            .sung_end(),
+            Some(Duration::from_millis(4000))
+        );
+    }
 }

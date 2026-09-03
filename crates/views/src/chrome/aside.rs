@@ -5,10 +5,11 @@ use gpui::prelude::*;
 use icu_segmenter::{LineSegmenter, options::LineBreakOptions};
 
 use gpui::{
-    Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity, FontWeight,
-    MouseDownEvent, Pixels, Point, Render, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
-    SharedString, SpringConfig, SpringState, Task, UniformListScrollHandle, Window, div,
-    ease_in_out, px, relative, svg, uniform_list,
+    Animation, AnimationExt as _, App, Bounds, ContentMask, Context, DecorationRun, Div,
+    DragMoveEvent, Element, Entity, FontWeight, GlobalElementId, Hsla, InspectorElementId,
+    LayoutId, LineLayout, MouseDownEvent, Pixels, Point, Render, ScrollHandle, ScrollStrategy,
+    ScrollWheelEvent, ShapedLine, SharedString, SpringConfig, SpringState, Style, Task, TextAlign,
+    UniformListScrollHandle, Window, div, ease_in_out, point, px, size, svg, uniform_list,
 };
 use i18n::t;
 use music::{Track, Voice};
@@ -40,7 +41,6 @@ const VERSE_FADE: f32 = 1.25;
 const VERSE_SPRING: SpringConfig = SpringConfig::new(170., 23., 1.);
 const PAST: f32 = 0.4;
 const AHEAD: f32 = 0.6;
-const REVEAL: f32 = 0.6;
 const ACTIVE_VERSE_GROWTH: Pixels = px(2.);
 const FULLSCREEN_VERSE_GROWTH: Pixels = px(3.);
 const LYRICS_HORIZONTAL_INSET_REM: f32 = 1.5;
@@ -77,7 +77,6 @@ const KARAOKE_HZ: u32 = 45;
 const KARAOKE_FRAME: std::time::Duration =
     std::time::Duration::from_nanos(1_000_000_000 / KARAOKE_HZ as u64);
 const SWEEP_STRETCH: f32 = 1.4;
-const SWEPT: f32 = 0.98;
 // what a lane row actually takes, plus the gaps between lanes
 const LANE_GAP_REM: f32 = 0.25;
 const LANE_SLACK: f32 = 0.25;
@@ -270,6 +269,7 @@ pub(crate) struct Aside {
     departure: u64,
     lyrics_wrap_width: Option<Pixels>,
     lyrics_wrap_size: Option<Pixels>,
+    lyrics_wrap_font: Option<String>,
     lyrics_wraps: HashMap<usize, Wrapped>,
     lane_rooms: HashMap<usize, Pixels>,
     lane_plans: HashMap<usize, HashMap<usize, Wrapped>>,
@@ -366,6 +366,7 @@ impl Aside {
             departure: 0,
             lyrics_wrap_width: None,
             lyrics_wrap_size: None,
+            lyrics_wrap_font: None,
             lyrics_wraps: HashMap::new(),
             lane_rooms: HashMap::new(),
             lane_plans: HashMap::new(),
@@ -927,13 +928,14 @@ impl Aside {
             .map(|hit| (hit.source, hit.writers.clone()));
         let following = lyrics.following().map(str::to_owned);
         let take = lyrics.revision();
-        let (karaoke_lyrics, romanization_scripts) = {
+        let (karaoke_lyrics, romanization_scripts, lyrics_wrap_font) = {
             let settings = self.settings.read(cx);
             (
                 settings.karaoke_lyrics(),
                 settings
                     .romanized_lyrics()
                     .then(|| settings.romanization_scripts()),
+                settings.font().to_owned(),
             )
         };
         let karaoke_effects = karaoke_lyrics && effects();
@@ -1010,9 +1012,13 @@ impl Aside {
         let wrap_width = (scroll.bounds().size.width - inset)
             .min(reach - inset)
             .max(px(0.));
-        if self.lyrics_wrap_width != Some(wrap_width) || self.lyrics_wrap_size != Some(wrap_size) {
+        if self.lyrics_wrap_width != Some(wrap_width)
+            || self.lyrics_wrap_size != Some(wrap_size)
+            || self.lyrics_wrap_font.as_deref() != Some(lyrics_wrap_font.as_str())
+        {
             self.lyrics_wrap_width = Some(wrap_width);
             self.lyrics_wrap_size = Some(wrap_size);
+            self.lyrics_wrap_font = Some(lyrics_wrap_font);
             self.forget_measurements();
             window.request_animation_frame();
         }
@@ -1205,8 +1211,7 @@ impl Aside {
 
                     let primary = match (primary_karaoke, line.words.as_ref(), wrapped) {
                         (true, Some(words), Some(plan)) => {
-                            karaoke_lane(plan, line.start, words, position, verse, line.voice, sung)
-                                .into_any_element()
+                            karaoke_lane(plan, words, position, line.voice, sung).into_any_element()
                         }
                         (_, _, Some(plan)) => {
                             fixed_lyrics_lane(&plan.text, line.voice, sung).into_any_element()
@@ -1856,46 +1861,20 @@ fn fixed_lyrics_lane(rows: &[SharedString], voice: Voice, sung: Sung) -> Div {
 
 fn karaoke_lane(
     plan: &Wrapped,
-    line_start: std::time::Duration,
     words: &[music::LyricsWord],
     position: std::time::Duration,
-    verse: Pixels,
     voice: Voice,
     sung: Sung,
 ) -> Div {
     let theme = &sung.theme;
-    let edge_fade = verse * REVEAL;
     let windows = (0..words.len())
         .map(|word| {
-            let (start, end) = karaoke_window(line_start, words, word);
+            let (start, end) = karaoke_window(words, word);
             (start, end, word + 1 >= words.len())
         })
         .collect::<Vec<_>>();
-    let lit = |text: SharedString, reveal: Reveal| {
-        div()
-            .relative()
-            .flex_none()
-            .whitespace_nowrap()
-            .child(text.clone())
-            .when(reveal.shown, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .map(|this| match reveal.width {
-                            Some(width) => this.w(width),
-                            None => this.w(relative(reveal.share)),
-                        })
-                        .overflow_hidden()
-                        .text_color(theme.foreground)
-                        .when(reveal.landing > 0., |this| {
-                            this.fade_sides(px(0.), edge_fade * reveal.landing)
-                        })
-                        .child(div().whitespace_nowrap().child(text)),
-                )
-            })
+    let lit = |shape: ShapedLine, reveal: Vec<RevealRange>| {
+        KaraokeText::new(shape, reveal, theme.foreground)
     };
 
     match plan.rows.is_empty() {
@@ -1904,12 +1883,12 @@ fn karaoke_lane(
             .flex_col()
             .text_left()
             .children((0..plan.rows.len()).map(|row| {
-                let reveal = revealed(plan, plan.rows[row].clone(), &windows, position, edge_fade);
+                let reveal = revealed(plan, plan.rows[row].clone(), &windows, position);
                 lifted(
                     div()
                         .flex()
                         .when(!voice.lead(), |this| this.justify_end())
-                        .child(lit(plan.text[row].clone(), reveal)),
+                        .child(lit(plan.shapes[row].clone(), reveal)),
                     sung,
                 )
             })),
@@ -1919,21 +1898,163 @@ fn karaoke_lane(
             .text_left()
             .when(!voice.lead(), |this| this.justify_end())
             .children((0..plan.units.len()).map(|index| {
-                let reveal = revealed(plan, index..index + 1, &windows, position, edge_fade);
-                let text = SharedString::from(
-                    plan.source.as_ref()[plan.units[index].range.clone()].to_owned(),
-                );
-                lit(text, reveal)
+                let reveal = revealed(plan, index..index + 1, &windows, position);
+                lit(plan.shapes[index].clone(), reveal)
             })),
     }
 }
 
+struct KaraokeText {
+    line: ShapedLine,
+    ranges: Vec<RevealRange>,
+    foreground: Hsla,
+}
+
+struct KaraokeTextLayout {
+    line_height: Pixels,
+    base: DecorationRun,
+    foreground: DecorationRun,
+}
+
+impl KaraokeText {
+    fn new(line: ShapedLine, ranges: Vec<RevealRange>, foreground: Hsla) -> Self {
+        Self {
+            line,
+            ranges,
+            foreground,
+        }
+    }
+}
+
+impl IntoElement for KaraokeText {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for KaraokeText {
+    type RequestLayoutState = KaraokeTextLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = window.text_style();
+        let base_run = style.to_run(self.line.len());
+        let line_height = style.line_height_in_pixels(window.rem_size());
+
+        let mut layout_style = Style {
+            flex_shrink: 0.,
+            ..Style::default()
+        };
+        layout_style.size.width = self.line.width().into();
+        layout_style.size.height = line_height.into();
+
+        let base = DecorationRun {
+            len: self.line.len() as u32,
+            color: base_run.color,
+            background_color: base_run.background_color,
+            underline: base_run.underline,
+            strikethrough: base_run.strikethrough,
+        };
+        let foreground = DecorationRun {
+            len: self.line.len() as u32,
+            color: self.foreground,
+            background_color: base_run.background_color,
+            underline: base_run.underline,
+            strikethrough: base_run.strikethrough,
+        };
+
+        (
+            window.request_layout(layout_style, [], cx),
+            KaraokeTextLayout {
+                line_height,
+                base,
+                foreground,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        layout: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        LineLayout::paint(
+            &self.line,
+            bounds.origin,
+            layout.line_height,
+            TextAlign::Left,
+            None,
+            std::slice::from_ref(&layout.base),
+            window,
+            cx,
+        )
+        .ok();
+
+        for range in self.ranges.iter().copied() {
+            if range.end <= range.start {
+                continue;
+            }
+
+            let mask = ContentMask {
+                bounds: Bounds::new(
+                    point(bounds.origin.x + range.start, bounds.origin.y),
+                    size(range.end - range.start, bounds.size.height),
+                ),
+            };
+
+            window.with_content_mask(Some(mask), |window| {
+                LineLayout::paint(
+                    &self.line,
+                    bounds.origin,
+                    layout.line_height,
+                    TextAlign::Left,
+                    None,
+                    std::slice::from_ref(&layout.foreground),
+                    window,
+                    cx,
+                )
+                .ok();
+            });
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-struct Reveal {
-    shown: bool,
-    width: Option<Pixels>,
-    share: f32,
-    landing: f32,
+struct RevealRange {
+    start: Pixels,
+    end: Pixels,
 }
 
 fn revealed(
@@ -1941,9 +2062,8 @@ fn revealed(
     units: Range<usize>,
     windows: &[(std::time::Duration, std::time::Duration, bool)],
     position: std::time::Duration,
-    fade: Pixels,
-) -> Reveal {
-    let mut front = px(0.);
+) -> Vec<RevealRange> {
+    let mut ranges: Vec<(Pixels, Pixels)> = Vec::new();
     let mut offset = px(0.);
     for index in units {
         let unit = &plan.units[index];
@@ -1968,30 +2088,26 @@ fn revealed(
                     true => ((whole * share - part.before) / part.width).clamp(0., 1.),
                     false => 0.,
                 };
-                let reach = offset + part.offset + part.width * progress;
-                if progress > 0. && reach > front {
-                    front = reach;
+                let start = offset + part.offset;
+                let end = start + part.width * progress;
+                if end <= start {
+                    continue;
+                }
+                match ranges.last_mut() {
+                    Some((_, previous_end)) if start <= *previous_end => {
+                        *previous_end = (*previous_end).max(end);
+                    }
+                    _ => ranges.push((start, end)),
                 }
             }
         }
         offset += unit.width;
     }
 
-    // The edge keeps one soft trail the whole way across a row, no wider than
-    // the text left to reveal. Letting it harden at every word would drag the
-    // visible edge back each time, and a word can end mid-word: providers split
-    // "nothing" into "no" and "thing".
-    let landing = match fade > px(0.) {
-        true => ((offset - front) / fade).min(1.),
-        false => 0.,
-    };
-
-    Reveal {
-        shown: front > px(0.),
-        width: Some(front),
-        share: 1.,
-        landing,
-    }
+    ranges
+        .into_iter()
+        .map(|(start, end)| RevealRange { start, end })
+        .collect()
 }
 
 struct SecondaryLaneLook<'a> {
@@ -2036,9 +2152,9 @@ fn secondary_lyrics_lane(
         div()
             .text_size(size)
             .map(|this| match (karaoke_capable, lane.words.as_ref(), plan) {
-                (true, Some(words), Some(plan)) => this.child(karaoke_lane(
-                    plan, lane.start, words, position, size, voice, sung,
-                )),
+                (true, Some(words), Some(plan)) => {
+                    this.child(karaoke_lane(plan, words, position, voice, sung))
+                }
                 _ => this.child(SharedString::from(lane.text.clone())),
             });
     let held = shade(true);
@@ -2092,23 +2208,18 @@ fn romanized_lyrics_lane(text: String, theme: &ui::Theme) -> Div {
 }
 
 fn karaoke_window(
-    line_start: std::time::Duration,
     words: &[music::LyricsWord],
     index: usize,
 ) -> (std::time::Duration, std::time::Duration) {
     let word = &words[index];
-    let start = match index {
-        0 => line_start.min(word.start),
-        _ => word.start,
-    };
-    let sung = word.end.max(start);
-    let end = match words.get(index + 1) {
-        // a rest after a word ends its sweep there rather than dragging it along
-        Some(next) => match sung > start {
-            true => next.start.max(start).min(sung),
-            false => next.start.max(start),
-        },
-        None => sung,
+    let start = word.start;
+    let end = match word.end > start {
+        true => word.end,
+        false => words
+            .get(index + 1)
+            .map(|next| next.start.max(start))
+            .filter(|end| *end > start)
+            .unwrap_or(start + SWEEP_LEAST),
     };
     (start, end)
 }
@@ -2154,12 +2265,12 @@ struct VisualUnit {
 // Original text remains source of truth; units and rows only hold byte ranges into it.
 #[derive(Clone)]
 struct Wrapped {
-    source: SharedString,
     units: Vec<VisualUnit>,
     rows: Vec<Range<usize>>,
     word_widths: Vec<Pixels>,
     evenly: Vec<bool>,
     text: Vec<SharedString>,
+    shapes: Vec<ShapedLine>,
 }
 
 fn lyrics_wrap_rows(
@@ -2208,16 +2319,37 @@ fn lyrics_plan(
             SharedString::from(source.as_ref()[start..end].to_owned())
         })
         .collect::<Vec<_>>();
+    let shapes = match (words.is_some(), rows.is_empty()) {
+        (false, _) => Vec::new(),
+        (true, true) => units
+            .iter()
+            .map(|unit| shaped_range(&shaped, unit.range.clone()))
+            .collect(),
+        (true, false) => rows
+            .iter()
+            .map(|row| {
+                let start = units[row.start].range.start;
+                let end = units[row.end - 1].range.end;
+                shaped_range(&shaped, start..end)
+            })
+            .collect(),
+    };
     let evenly = evenly_timed(line, &timing, &units, timing.len());
 
     Wrapped {
-        source,
         units,
         rows,
         word_widths,
         evenly,
         text,
+        shapes,
     }
+}
+
+fn shaped_range(line: &ShapedLine, range: Range<usize>) -> ShapedLine {
+    let (_, suffix) = line.split_at(range.start);
+    let (slice, _) = suffix.split_at(range.end - range.start);
+    slice
 }
 
 fn measured_units(
@@ -2437,15 +2569,18 @@ fn swept(
     tail: bool,
 ) -> f32 {
     let span = end.saturating_sub(start);
-    let travel = match tail {
-        true => span.max(SWEEP_LEAST),
-        false => span.mul_f32(SWEEP_STRETCH).max(SWEEP_LEAST),
+    let progress = match span.is_zero() {
+        true => progress_between(start, start + SWEEP_LEAST, position),
+        false => {
+            let stretch = match tail {
+                true => 1.,
+                false => SWEEP_STRETCH,
+            };
+            let endpoint = ease_out_cubic((1. / stretch).min(1.));
+            ease_out_cubic((progress_between(start, end, position) / stretch).min(1.)) / endpoint
+        }
     };
-    let eased = ease_out_cubic(progress_between(start, start + travel, position));
-    match eased >= SWEPT {
-        true => 1.,
-        false => eased,
-    }
+    progress.clamp(0., 1.)
 }
 
 fn progress_between(
@@ -2704,12 +2839,12 @@ mod tests {
     use music::{LyricsLane, LyricsLine, LyricsWord, Voice};
 
     use super::{
-        QueuePosition, Sections, Slot, VisualUnit, active_lyrics_row, anchored_lyrics_offset,
-        emergency_ranges, karaoke_window, lag_spring, line_has_passed, line_row, lyric_row_count,
-        measured_units, normal_break_ranges, secondary_karaoke_visible, timing_spans,
-        wrap_unit_widths,
+        QueuePosition, Sections, Slot, TimingPart, VisualUnit, Wrapped, active_lyrics_row,
+        anchored_lyrics_offset, emergency_ranges, karaoke_window, lag_spring, line_has_passed,
+        line_row, lyric_row_count, measured_units, normal_break_ranges, revealed,
+        secondary_karaoke_visible, swept, timing_spans, wrap_unit_widths,
     };
-    use gpui::{Pixels, px};
+    use gpui::{Pixels, SharedString, px};
 
     fn test_units(widths: &[Pixels]) -> Vec<VisualUnit> {
         widths
@@ -2739,6 +2874,38 @@ mod tests {
                 text: (*text).to_owned(),
             })
             .collect()
+    }
+
+    fn reveal_plan() -> Wrapped {
+        Wrapped {
+            units: vec![
+                VisualUnit {
+                    range: 0..2,
+                    width: px(10.),
+                    parts: vec![TimingPart {
+                        word: 0,
+                        offset: px(0.),
+                        before: px(0.),
+                        width: px(10.),
+                    }],
+                },
+                VisualUnit {
+                    range: 3..5,
+                    width: px(10.),
+                    parts: vec![TimingPart {
+                        word: 1,
+                        offset: px(0.),
+                        before: px(0.),
+                        width: px(10.),
+                    }],
+                },
+            ],
+            rows: std::iter::once(0..2).collect(),
+            word_widths: vec![px(10.), px(10.)],
+            evenly: vec![true, true],
+            text: vec![SharedString::from("AA BB")],
+            shapes: Vec::new(),
+        }
     }
 
     fn slots(sections: Sections) -> Vec<Slot> {
@@ -3025,7 +3192,7 @@ mod tests {
     }
 
     #[test]
-    fn a_late_first_word_uses_the_whole_lead_in() {
+    fn a_late_first_word_starts_at_provider_time() {
         let words = vec![
             LyricsWord {
                 start: Duration::from_millis(1500),
@@ -3040,9 +3207,152 @@ mod tests {
         ];
 
         assert_eq!(
-            karaoke_window(Duration::from_millis(1000), &words, 0),
-            (Duration::from_millis(1000), Duration::from_millis(1900))
+            karaoke_window(&words, 0),
+            (Duration::from_millis(1500), Duration::from_millis(1900))
         );
+        let plan = reveal_plan();
+        let windows = [(
+            Duration::from_millis(1500),
+            Duration::from_millis(1900),
+            true,
+        )];
+        assert!(revealed(&plan, 0..1, &windows, Duration::from_millis(1499)).is_empty());
+    }
+
+    #[test]
+    fn overlapping_word_windows_keep_provider_ends() {
+        let words = vec![
+            LyricsWord {
+                start: Duration::from_millis(1000),
+                end: Duration::from_millis(2000),
+                text: "A".to_owned(),
+            },
+            LyricsWord {
+                start: Duration::from_millis(1500),
+                end: Duration::from_millis(2500),
+                text: "B".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            karaoke_window(&words, 0),
+            (Duration::from_millis(1000), Duration::from_millis(2000))
+        );
+        assert_eq!(
+            karaoke_window(&words, 1),
+            (Duration::from_millis(1500), Duration::from_millis(2500))
+        );
+    }
+
+    #[test]
+    fn zero_duration_word_uses_only_limited_fallback() {
+        let words = vec![
+            LyricsWord {
+                start: Duration::from_millis(1000),
+                end: Duration::from_millis(1000),
+                text: "A".to_owned(),
+            },
+            LyricsWord {
+                start: Duration::from_millis(1500),
+                end: Duration::from_millis(2000),
+                text: "B".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            karaoke_window(&words, 0),
+            (Duration::from_millis(1000), Duration::from_millis(1500))
+        );
+        assert_eq!(
+            karaoke_window(&words[..1], 0),
+            (Duration::from_millis(1000), Duration::from_millis(1180))
+        );
+    }
+
+    #[test]
+    fn positive_sweep_ends_at_provider_end() {
+        assert_eq!(
+            swept(
+                Duration::from_millis(1000),
+                Duration::from_millis(1100),
+                Duration::from_millis(1100),
+                false,
+            ),
+            1.
+        );
+        assert_eq!(
+            swept(
+                Duration::from_millis(1000),
+                Duration::from_millis(10_000),
+                Duration::from_millis(10_000),
+                false,
+            ),
+            1.
+        );
+        assert!(
+            swept(
+                Duration::from_millis(1500),
+                Duration::from_millis(2500),
+                Duration::from_millis(2250),
+                true,
+            ) < 1.
+        );
+    }
+
+    #[test]
+    fn overlapping_reveal_ranges_do_not_fill_the_gap() {
+        let plan = reveal_plan();
+        let windows = [
+            (
+                Duration::from_millis(1000),
+                Duration::from_millis(2000),
+                false,
+            ),
+            (
+                Duration::from_millis(1500),
+                Duration::from_millis(2500),
+                true,
+            ),
+        ];
+        let reveal = revealed(
+            &plan,
+            0..plan.units.len(),
+            &windows,
+            Duration::from_millis(1750),
+        );
+
+        assert_eq!(reveal.len(), 2);
+        assert_eq!(reveal[0].start, px(0.));
+        assert_eq!(reveal[0].end, px(7.5));
+        assert_eq!(reveal[1].start, px(10.));
+        assert_eq!(reveal[1].end, px(12.5));
+    }
+
+    #[test]
+    fn sequential_reveal_ranges_still_join_continuously() {
+        let plan = reveal_plan();
+        let windows = [
+            (
+                Duration::from_millis(1000),
+                Duration::from_millis(1500),
+                false,
+            ),
+            (
+                Duration::from_millis(1500),
+                Duration::from_millis(2000),
+                true,
+            ),
+        ];
+        let reveal = revealed(
+            &plan,
+            0..plan.units.len(),
+            &windows,
+            Duration::from_millis(1750),
+        );
+
+        assert_eq!(reveal.len(), 1);
+        assert_eq!(reveal[0].start, px(0.));
+        assert_eq!(reveal[0].end, px(15.));
     }
 
     #[test]
