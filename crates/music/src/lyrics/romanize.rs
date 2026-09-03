@@ -30,7 +30,7 @@ fn detect<'a>(texts: impl Iterator<Item = &'a str>) -> Option<WritingSystem> {
     dominant_system(&text)
 }
 
-fn convert(text: &str, system: WritingSystem) -> Option<RomanizedText> {
+pub(super) fn convert(text: &str, system: WritingSystem) -> Option<RomanizedText> {
     let romanized = match system {
         WritingSystem::Japanese => super::japanese::romanize(text),
         _ => universal(text),

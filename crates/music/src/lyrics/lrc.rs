@@ -108,6 +108,28 @@ pub fn normalize(lines: &mut Vec<LyricsLine>) {
     *lines = normalized;
 }
 
+pub(super) fn normalize_conformed_background(line: &mut LyricsLine) {
+    if line.words.is_some() {
+        let spans = parenthetical_spans(&line.text);
+        if spans.is_empty() {
+            return;
+        }
+        let system = line.romanized.as_ref().map(|r| r.writing_system);
+        separate_background(line);
+        bracket(std::slice::from_mut(line));
+        if let Some(system) = system {
+            line.romanized = romanize::convert(&line.text, system);
+        }
+        for lane in &mut line.secondary {
+            if lane.romanized.is_none() {
+                lane.romanized = system
+                    .and_then(|sys| romanize::convert(&lane.text, sys))
+                    .or_else(|| romanize::plain(&lane.text));
+            }
+        }
+    }
+}
+
 fn bracket(lines: &mut [LyricsLine]) {
     for lane in lines.iter_mut().flat_map(|line| line.secondary.iter_mut()) {
         if lane.text.trim().is_empty() || lane.text.contains(['(', ')']) {
