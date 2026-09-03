@@ -58,6 +58,11 @@ app-refresh-library = Bibliothek aktualisieren
 app-sign-out = Abmelden
 app-quit = Beenden
 
+# tray menu
+tray-show = Sonora anzeigen
+tray-play = Wiedergabe
+tray-pause = Pause
+
 # table columns
 column-played-at = Abgespielt
 column-index = #
@@ -399,6 +404,8 @@ settings-window-controls = Fenstersteuerung
 settings-window-controls-detail = Minimieren, Maximieren und Schließen in der Titelleiste zeichnen
 settings-controls-side = Seite der Steuerung
 settings-controls-side-detail = An welchem Ende der Titelleiste die Bedienelemente sitzen
+settings-close-to-tray = Beim Schließen weiterspielen
+settings-close-to-tray-detail = Sonora bleibt nach dem Schließen im System-Tray und spielt weiter
 settings-normalisation = Lautstärke angleichen
 settings-normalisation-detail = Hält Titel auf einer gleichmäßigen Lautstärke
 settings-gapless = Lückenlose Wiedergabe
@@ -416,6 +423,7 @@ settings-romanization-greek = Griechische Schrift
 settings-romanization-arabic = Arabische Schrift
 settings-romanization-other = Andere Schriftsysteme
 settings-advanced = Erweitert
+settings-group-window = Fenster
 settings-group-accounts = Konten
 settings-group-library = Bibliothek
 settings-group-text = Text

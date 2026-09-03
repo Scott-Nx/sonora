@@ -6,7 +6,7 @@ use anyhow::Result;
 use gpui::{App, Context, Entity, EventEmitter, SharedString, Task};
 use music::{
     MusicApi, PlaybackConfig, PlaybackEvent as BackendEvent, PlaybackEvents, PlaybackFactory,
-    Player, Track,
+    Player, Spectrum, Track,
 };
 use ui::{Pin, PinKind};
 
@@ -372,6 +372,10 @@ impl Playback {
     fn active_engine(&self) -> Option<&dyn Player> {
         let id = self.track.as_ref()?.id.as_deref()?;
         self.engine_for(id)
+    }
+
+    pub fn spectrum(&self) -> Option<Spectrum> {
+        self.active_engine()?.spectrum()
     }
 
     fn silence_other(&self, id: &str) {
@@ -930,7 +934,7 @@ impl Playback {
             Repeat::All if !self.queue.read(cx).has_next() => {
                 self.fetch = None;
                 if let Some(track) = self.queue.update(cx, |queue, cx| queue.rewind(cx)) {
-                    self.load_after(&track, Start::Segue, cx);
+                    self.follow_after(track, Start::Segue, cx);
                 }
             }
             _ if self.radio && !self.queue.read(cx).has_next() => {
@@ -987,6 +991,16 @@ impl Playback {
         let Some(track) = self.queue.update(cx, |queue, cx| queue.next(cx)) else {
             return;
         };
+        self.follow_after(track, start, cx);
+    }
+
+    fn follow_after(&mut self, mut track: Track, start: Start, cx: &mut Context<Self>) {
+        while !track.playable {
+            let Some(next) = self.queue.update(cx, |queue, cx| queue.next(cx)) else {
+                return;
+            };
+            track = next;
+        }
         self.load_after(&track, start, cx);
     }
 
@@ -1317,6 +1331,40 @@ impl Playback {
         }
     }
 
+    fn restart_output(&mut self, cx: &mut Context<Self>) {
+        let Some(track) = self.track.clone() else {
+            return;
+        };
+        let Some(id) = track.id.as_deref() else {
+            return;
+        };
+        let at = self.live_position();
+        let local = music::is_local_id(id);
+        let playback = match local {
+            true => self.session.read(cx).local_playback(),
+            false => self.session.read(cx).playback(),
+        };
+        let Some(playback) = playback else {
+            return;
+        };
+
+        log::info!("playback: restarting after the audio output changed");
+        match local {
+            true => {
+                self.local_task = None;
+                self.local_engine = None;
+                self.start_local_engine(playback, cx);
+            }
+            false => {
+                self.task = None;
+                self.engine = None;
+                self.start_engine(playback, cx);
+            }
+        }
+        self.load_after(&track, Start::Pick, cx);
+        self.seek_on_play = Some(at);
+    }
+
     fn ask_for_reconnect(&mut self, cx: &mut Context<Self>) -> bool {
         if self.track.is_none() {
             return false;
@@ -1401,6 +1449,7 @@ impl Playback {
             return;
         }
         match event {
+            BackendEvent::OutputChanged => self.restart_output(cx),
             BackendEvent::Unavailable | BackendEvent::Refused if self.resume_ready => {
                 self.resume_ready = false;
                 self.state = PlaybackState::Paused;

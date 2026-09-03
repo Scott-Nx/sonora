@@ -22,7 +22,7 @@ A native music streaming client, built with Rust and [GPUI](https://github.com/z
 
 ```
 crates/
-  sonora/     binary: main, window, actions, asset registry, HTTP client shim
+  sonora/     binary: main, window, actions, asset registry, HTTP client shim, tray, dock
   views/      screens plus app chrome: title bar, sidebar, player bar, filter/search field
   state/      GPUI entities holding app state; owns all async orchestration
   music/      provider traits + models; spotify/ = librespot data access and playback (no GPUI)
@@ -127,9 +127,12 @@ sudo dnf install @development-tools pkgconf-pkg-config mold alsa-lib-devel fontc
 `flatpak/flatpak-builder.yaml` builds against the freedesktop 25.08 runtime with the `rust-stable`
 extension, which also supplies the mold that `.cargo/config.toml` asks for. `flatpak/generate-sources.sh`
 turns `Cargo.lock` into `cargo-sources.json` (generated, never committed) and `flatpak/build-flatpak.sh`
-runs the build locally. The release workflow builds both arches in Flathub's builder image, attaches
-the `.flatpak` bundles to the release, then imports them into the signed OSTree repo on the
-`flatpak-repo` branch, which GitHub Pages serves at `https://nolight132.github.io/sonora`.
+runs the build locally. The release workflow builds both arches in Flathub's builder image, imports them
+into the signed OSTree repo on the `flatpak-repo` branch, which GitHub Pages serves at
+`https://nolight132.github.io/sonora`, and only then attaches `.flatpak` bundles to the release:
+`flatpak/export-bundles.sh` re-exports them from that repo so each carries the commit signature, the
+repo URL and the public key, and `flatpak update` follows the repo afterwards. `flatpak-bundles.yml`
+reruns that export for an existing release and swaps its bundles and checksum lines.
 `flatpak/pages/` holds the `.flatpakref` and `.flatpakrepo` that point there, with the public half
 of the `FLATPAK_GPG_KEY` secret embedded — a new key means regenerating both. Flathub is not an
 option: its requirements forbid AI-assisted code.
@@ -671,6 +674,21 @@ field in the title bar. Don't build a second search box.
 `bindings()`, handle them with `cx.on_action` (global, in `sonora/src/actions.rs`) or
 `.on_action(cx.listener(…))` (scoped). Key contexts: `Workspace`, `Input`, `Table`. Both `cmd-` and
 `ctrl-` bindings are registered for every shortcut.
+
+**The tray outlives the window.** `sonora/src/tray.rs` owns one `Tray` entity driven by two
+backends: `tray/native.rs` (`tray-icon`, macOS and Windows) and `tray/sni.rs` (`ksni`, Linux over
+D-Bus, no gtk). Both expose the same `Icon::new(sender) -> Option<Icon>` / `Icon::show(&Shown)`
+pair; the entity turns tray events into `Playback` calls the way `state::remote` does and rebuilds
+the labels from `t!` on every playback change, so they follow the language. `install` returns
+`false` when no tray can be placed — no StatusNotifierWatcher on the bus, say — and
+`actions::register` then keeps the old quit-on-last-window behaviour, so a headless Sonora never
+lingers unreachable. With a tray and `close_to_tray` on, the last window closing only flips
+`dock::show(false)` (Accessory policy on macOS; a no-op elsewhere) and `show_window` in `main.rs`
+brings it back from the tray, a Dock relaunch (`on_reopen`) or a `spotify:` link. `ksni` must stay
+on `async-io`: `gpui_linux` already drives `zbus` on that executor, and mixing in `zbus/tokio`
+panics at runtime. The icons come from `assets/tray/`, which `scripts/generate-icons.py` derives
+from the master like every other artefact — a template glyph for the macOS menu bar, the round
+one for Windows and Linux.
 
 **Assets.** `crates/sonora/src/assets.rs` answers GPUI for icons from the `icons` crate. The
 UI font is chosen through settings: `auto` asks GPUI for `.SystemUIFont`, and an explicit value

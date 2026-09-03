@@ -294,7 +294,7 @@ jobs:
           bundle: sonora-${{ steps.meta.outputs.version }}-${{ matrix.variant.arch }}.flatpak
           arch: ${{ matrix.variant.arch }}
           upload-artifact: true
-          artifact-name: release-flatpak-${{ matrix.variant.arch }}
+          artifact-name: flatpak-${{ matrix.variant.arch }}
 
   flatpak-repo:
     needs: flatpak
@@ -307,7 +307,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-flatpak-*
+          pattern: flatpak-*
           path: bundles
           merge-multiple: true
 
@@ -360,6 +360,17 @@ jobs:
           rm -rf site/repo/tmp
           cp -R flatpak/pages/. site/
 
+      - name: export the bundles
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./flatpak/export-bundles.sh site/repo "$VERSION" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-flatpak
+          path: dist/*
+          if-no-files-found: error
+
       - name: push the repo
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -376,7 +387,7 @@ jobs:
           git push --force "https://x-access-token:$TOKEN@github.com/$GITHUB_REPOSITORY" flatpak-repo
 
   release:
-    needs: [build, bundle, flatpak]
+    needs: [build, bundle, flatpak, flatpak-repo]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

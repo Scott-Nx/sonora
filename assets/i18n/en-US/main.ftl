@@ -58,6 +58,11 @@ app-refresh-library = Refresh Library
 app-sign-out = Sign Out
 app-quit = Quit
 
+# tray menu
+tray-show = Show Sonora
+tray-play = Play
+tray-pause = Pause
+
 # table columns
 column-played-at = Played
 column-index = #
@@ -429,6 +434,8 @@ settings-opacity-value = { $percent }%
 settings-theme-config = Open config
 settings-adaptive = Adaptive theme
 settings-adaptive-detail = Tint the palette with the artwork of the playing album
+settings-visualizer = Visualizer
+settings-visualizer-detail = Show spectrum bars behind fullscreen artwork
 settings-icons = Icon pack
 settings-icons-detail = Choose the icon set the interface draws from
 settings-motion = Reduce motion
@@ -461,10 +468,17 @@ settings-window-controls = Window controls
 settings-window-controls-detail = Draw minimise, maximise and close in the title bar
 settings-controls-side = Controls side
 settings-controls-side-detail = Which end of the title bar the controls sit on
+settings-close-to-tray = Keep playing when closed
+settings-close-to-tray-detail = Keep Sonora in the system tray and continue playing after its window closes
 settings-normalisation = Normalize loudness
 settings-normalisation-detail = Keeps tracks at a consistent volume
 settings-gapless = Gapless playback
 settings-gapless-detail = Runs one track into the next without a pause, the way an album was sequenced
+settings-panel-lyrics-size = Lyrics size (panel)
+settings-panel-lyrics-size-detail = Size of the lyrics text in the side panel, on top of the base font size
+settings-fullscreen-lyrics-size = Lyrics size (fullscreen)
+settings-fullscreen-lyrics-size-detail = Size of the lyrics text on the fullscreen player, on top of the base font size
+settings-lyrics-size-value = { $size }%
 settings-karaoke-lyrics = Karaoke lyrics
 settings-karaoke-lyrics-detail = Highlight lyrics word by word when timing is available
 settings-romanized-lyrics = Romanized lyrics
@@ -478,6 +492,7 @@ settings-romanization-greek = Greek
 settings-romanization-arabic = Arabic
 settings-romanization-other = Other writing systems
 settings-advanced = Advanced
+settings-group-window = Window
 settings-group-accounts = Accounts
 settings-group-library = Library
 settings-group-text = Text

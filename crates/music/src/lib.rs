@@ -9,6 +9,7 @@ pub mod lyrics;
 mod models;
 pub mod musixmatch;
 pub mod netease;
+mod spectrum;
 pub mod spotify;
 pub mod youtube;
 
@@ -26,6 +27,7 @@ pub use models::{
     LyricsWord, Playlist, PlaylistDetail, ReleaseType, RomanizedText, SavedArtist, Track, TrackKey,
     TrackTags, UserDetail, UserProfile, Voice, WritingSystem,
 };
+pub use spectrum::Spectrum;
 
 pub const LOCAL_TRACK_PREFIX: &str = "local:";
 pub const LOCAL_ALBUM_PREFIX: &str = "local-album:";
@@ -169,6 +171,7 @@ pub enum PlaybackEvent {
     Unavailable,
     Refused,
     Gated,
+    OutputChanged,
 }
 
 pub trait Player: Send + Sync {
@@ -186,6 +189,10 @@ pub trait Player: Send + Sync {
     fn pause(&self);
     fn seek(&self, position: Duration);
     fn set_gain(&self, gain: f32);
+
+    fn spectrum(&self) -> Option<Spectrum> {
+        None
+    }
 }
 
 #[async_trait]

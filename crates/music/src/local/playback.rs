@@ -6,6 +6,8 @@ use rodio::Source as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::wire;
+use crate::audio::{Output, Volume};
+use crate::spectrum::Spectrum;
 use crate::{PlaybackConfig, PlaybackEvent, PlaybackEvents, PlaybackFactory, Player};
 
 const POLL: Duration = Duration::from_millis(20);
@@ -32,18 +34,24 @@ impl PlaybackFactory for Factory {
     fn start(&self, config: PlaybackConfig) -> (Box<dyn Player>, Box<dyn PlaybackEvents>) {
         let (commands, command_rx) = unbounded_channel();
         let (events, event_rx) = unbounded_channel();
+        let spectrum = Spectrum::new();
+        let engine_spectrum = spectrum.clone();
         let spawned = std::thread::Builder::new()
             .name("local-playback".to_owned())
-            .spawn(move || run(config, command_rx, events));
+            .spawn(move || run(config, command_rx, events, engine_spectrum));
         if let Err(error) = spawned {
             log::error!("playback: cannot spawn local engine thread: {error}");
         }
-        (Box::new(Engine { commands }), Box::new(Events(event_rx)))
+        (
+            Box::new(Engine { commands, spectrum }),
+            Box::new(Events(event_rx)),
+        )
     }
 }
 
 struct Engine {
     commands: UnboundedSender<Command>,
+    spectrum: Spectrum,
 }
 
 impl Player for Engine {
@@ -90,6 +98,10 @@ impl Player for Engine {
     fn set_gain(&self, gain: f32) {
         self.commands.send(Command::Gain(gain)).ok();
     }
+
+    fn spectrum(&self) -> Option<Spectrum> {
+        Some(self.spectrum.clone())
+    }
 }
 
 struct Events(UnboundedReceiver<PlaybackEvent>);
@@ -110,6 +122,7 @@ fn run(
     config: PlaybackConfig,
     commands: UnboundedReceiver<Command>,
     events: UnboundedSender<PlaybackEvent>,
+    spectrum: Spectrum,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -121,29 +134,30 @@ fn run(
             return;
         }
     };
-    runtime.block_on(engine_loop(config, commands, events));
+    runtime.block_on(engine_loop(config, commands, events, spectrum));
 }
 
 async fn engine_loop(
     config: PlaybackConfig,
     mut commands: UnboundedReceiver<Command>,
     events: UnboundedSender<PlaybackEvent>,
+    spectrum: Spectrum,
 ) {
-    let stream = match rodio::OutputStreamBuilder::open_default_stream() {
-        Ok(stream) => stream,
+    let output = match Output::open(Volume::new(config.gain), spectrum) {
+        Ok(output) => output,
         Err(error) => {
-            log::error!("playback: cannot open audio output: {error}");
+            log::error!("playback: cannot open audio output: {error:#}");
             return;
         }
     };
-    let sink = rodio::Sink::connect_new(stream.mixer());
+    let sink = output.sink().clone();
     sink.pause();
-    sink.set_volume(config.gain);
 
     let mut ticker = tokio::time::interval(POLL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let report_every = (config.position_interval.as_millis() / POLL.as_millis()).max(1) as u32;
     let mut ticks = 0u32;
+    let mut output_ticks = 0u32;
 
     let mut playing = false;
     let mut current: Option<Slot> = None;
@@ -214,6 +228,10 @@ async fn engine_loop(
                         }
                     }
                     Command::Play => {
+                        if output.failed() || output.changed() {
+                            events.send(PlaybackEvent::OutputChanged).ok();
+                            return;
+                        }
                         if current.is_some() {
                             sink.play();
                             playing = true;
@@ -234,10 +252,18 @@ async fn engine_loop(
                             events.send(PlaybackEvent::Position(sink.get_pos())).ok();
                         }
                     }
-                    Command::Gain(level) => sink.set_volume(level),
+                    Command::Gain(level) => output.set_volume(level),
                 }
             }
             _ = ticker.tick() => {
+                output_ticks += 1;
+                if playing && (output.failed() || output_ticks >= report_every && output.changed()) {
+                    events.send(PlaybackEvent::OutputChanged).ok();
+                    return;
+                }
+                if output_ticks >= report_every {
+                    output_ticks = 0;
+                }
                 let len = sink.len();
                 ticks += 1;
                 if current.is_some() && playing && len < prev_len {

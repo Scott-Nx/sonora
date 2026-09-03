@@ -188,6 +188,7 @@ struct Touch {
 #[derive(Clone, Copy)]
 struct Sung {
     karaoke: bool,
+    lane: Pixels,
     scripts: Option<RomanizationScripts>,
     theme: ui::Theme,
     karaoke_tint: gpui::Hsla,
@@ -938,8 +939,14 @@ impl Aside {
             )
         };
         let karaoke_effects = karaoke_lyrics && effects();
+        let scale = match self.titled {
+            true => self.settings.read(cx).panel_lyrics_scale(),
+            false => self.settings.read(cx).fullscreen_lyrics_scale(),
+        };
+        let lane_size = theme.text(Text::Body) * scale;
         let sung = Sung {
             karaoke: karaoke_effects,
+            lane: lane_size,
             scripts: romanization_scripts,
             theme,
             karaoke_tint: theme.foreground,
@@ -992,7 +999,7 @@ impl Aside {
         let verse = match self.titled {
             true => theme.text(Text::Large),
             false => theme.text(Text::Title) + FULLSCREEN_VERSE_GROWTH,
-        };
+        } * scale;
         let reach = verse * REACH;
         let wrap_size = active_verse_size(verse);
         let scroll = self.verse_bar.read(cx).scroll().clone();
@@ -1270,7 +1277,7 @@ impl Aside {
                             let room = lanes_room(
                                 &line.secondary,
                                 romanization_scripts,
-                                theme.text(Text::Body),
+                                lane_size,
                                 active_verse_size(verse) * ui::LEADING,
                                 wrap_width,
                                 window,
@@ -1334,7 +1341,7 @@ impl Aside {
                         .child(primary)
                         .when_some(
                             selected_romanization(&line.romanized, romanization_scripts),
-                            |this, text| this.child(romanized_lyrics_lane(text, &theme)),
+                            |this, text| this.child(romanized_lyrics_lane(text, lane_size, &theme)),
                         )
                         .children(lanes)
                         .when(depth > 0., |this| {
@@ -1417,8 +1424,7 @@ impl Aside {
                     let rows = match &self.plain_rows {
                         Some(rows) => rows.clone(),
                         None => {
-                            let rows =
-                                plain_lyrics_rows(text, theme.text(Text::Body), wrap_width, window);
+                            let rows = plain_lyrics_rows(text, lane_size, wrap_width, window);
                             self.plain_rows = Some(rows.clone());
                             rows
                         }
@@ -1431,13 +1437,15 @@ impl Aside {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .text_size(theme.text(Text::Body))
+                            .text_size(lane_size)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
                             .children(rows)
                             .when_some(
                                 selected_romanization(romanized, romanization_scripts),
-                                |this, text| this.child(romanized_lyrics_lane(text, &theme)),
+                                |this, text| {
+                                    this.child(romanized_lyrics_lane(text, lane_size, &theme))
+                                },
                             )
                             .into_any_element(),
                     ]
@@ -2170,7 +2178,7 @@ fn secondary_lyrics_lane(
         }
     };
     let tint = shade(line_active);
-    let size = theme.text(Text::Body);
+    let size = sung.lane;
     let karaoke_capable = sung.karaoke && lane.worded();
     let lyrics =
         div()
@@ -2197,7 +2205,7 @@ fn secondary_lyrics_lane(
         .child(lyrics)
         .when_some(
             selected_romanization(&lane.romanized, sung.scripts),
-            |this, text| this.child(romanized_lyrics_lane(text, theme)),
+            |this, text| this.child(romanized_lyrics_lane(text, size, theme)),
         )
         .into_any_element()
 }
@@ -2224,9 +2232,9 @@ fn selected_romanization(
         .then(|| romanized.text.clone())
 }
 
-fn romanized_lyrics_lane(text: String, theme: &ui::Theme) -> Div {
+fn romanized_lyrics_lane(text: String, size: Pixels, theme: &ui::Theme) -> Div {
     div()
-        .text_size(theme.text(Text::Body))
+        .text_size(size)
         .text_color(theme.muted_foreground)
         .child(SharedString::from(text))
 }
