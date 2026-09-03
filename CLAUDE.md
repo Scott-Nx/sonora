@@ -98,6 +98,7 @@ sudo pacman -S --needed base-devel rust pkgconf alsa-lib dbus fontconfig freetyp
   libx11 libxcb libxcursor libxi libxkbcommon libxkbcommon-x11 wayland \
   vulkan-icd-loader mold
 # plus a Vulkan driver: vulkan-radeon | vulkan-intel | nvidia-utils
+# plus the ALSA bridge for your sound server: pipewire-alsa | pulseaudio-alsa
 
 cargo run --locked --package sonora
 cargo build --release --locked --package sonora && ./target/release/sonora
@@ -121,6 +122,18 @@ sudo dnf install @development-tools pkgconf-pkg-config mold alsa-lib-devel fontc
   mesa-vulkan-drivers
 ```
 
+### Flatpak
+
+`flatpak/flatpak-builder.yaml` builds against the freedesktop 25.08 runtime with the `rust-stable`
+extension, which also supplies the mold that `.cargo/config.toml` asks for. `flatpak/generate-sources.sh`
+turns `Cargo.lock` into `cargo-sources.json` (generated, never committed) and `flatpak/build-flatpak.sh`
+runs the build locally. The release workflow builds both arches in Flathub's builder image, attaches
+the `.flatpak` bundles to the release, then imports them into the signed OSTree repo on the
+`flatpak-repo` branch, which GitHub Pages serves at `https://nolight132.github.io/sonora`.
+`flatpak/pages/` holds the `.flatpakref` and `.flatpakrepo` that point there, with the public half
+of the `FLATPAK_GPG_KEY` secret embedded — a new key means regenerating both. Flathub is not an
+option: its requirements forbid AI-assisted code.
+
 ### macOS / Windows
 
 Released, but not developed against here. `.github/workflows/release.yml` builds both Apple targets
@@ -136,8 +149,8 @@ needs `xattr -dr com.apple.quarantine` on first launch. Do not add `--deep`; App
 signing and the bundle has no nested code.
 
 Windows embeds `assets/windows/sonora.ico` through `crates/sonora/build.rs` and `winresource`. It is
-also the one target that compiles SQLite instead of linking the system one: `crates/music/Cargo.toml`
-turns on rusqlite's `bundled` under `cfg(windows)`, because MSVC has no `libsqlite3` to find.
+also the one target that compiles SQLite instead of linking the system one: `crates/sonora/Cargo.toml`
+turns on `state/bundled-sqlite` under `cfg(windows)`, because MSVC has no `libsqlite3` to find.
 
 ### Checks
 

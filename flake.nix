@@ -89,9 +89,7 @@
             postFixup = ''
               patchelf \
                 --set-interpreter "${pkgs.stdenv.cc.bintools.dynamicLinker}" \
-                --add-rpath "${
-                  pkgs.lib.makeLibraryPath (runtimeLibraries ++ [ pkgs.stdenv.cc.cc.lib ])
-                }" \
+                --add-rpath "${pkgs.lib.makeLibraryPath (runtimeLibraries ++ [ pkgs.stdenv.cc.cc.lib ])}" \
                 "$out/bin/sonora"
             '';
 
@@ -145,6 +143,21 @@
             buildInputs = runtimeLibraries;
 
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
+
+            ALSA_PLUGIN_DIR = "${pkgs.symlinkJoin {
+              name = "alsa-plugins-combined";
+              paths = [
+                "${pkgs.alsa-plugins}/lib/alsa-lib"
+                "${pkgs.pipewire}/lib/alsa-lib"
+              ];
+            }}";
+
+            shellHook = ''
+              if [ ! -d /run/opengl-driver ]; then
+                export VK_DRIVER_FILES="${pkgs.mesa}/share/vulkan/icd.d"
+                export VK_IMPLICIT_LAYER_PATH="${pkgs.mesa}/share/vulkan/implicit_layer.d"
+              fi
+            '';
           };
         }
       );

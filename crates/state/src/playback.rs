@@ -475,16 +475,34 @@ impl Playback {
         }
 
         let origin = Origin::radio(id.clone()).named(seed.name.clone());
-        let seed = seed.clone();
-        self.gather(origin, cx, move |client| {
-            Box::pin(async move {
+        let Some(client) = self.client_for(&id, cx) else {
+            return;
+        };
+
+        self.fetch = None;
+        self.begin(vec![seed.clone()], 0, Some(origin.clone()), cx);
+
+        let seed_id = seed.id.clone();
+        let io = Io::global(cx);
+        self.fetch = Some(cx.spawn(async move |this, cx| {
+            let loaded = join(io.spawn(async move {
                 let mut tracks = client.track_radio(&id).await?;
-                tracks.retain(|track| track.id != seed.id && track.playable);
+                tracks.retain(|track| track.id != seed_id && track.playable);
                 fastrand::shuffle(&mut tracks);
-                tracks.insert(0, seed);
                 Ok(tracks)
+            }))
+            .await;
+
+            this.update(cx, |this, cx| match loaded {
+                Ok(tracks) if this.origin.as_ref() == Some(&origin) => {
+                    this.queue
+                        .update(cx, |queue, cx| queue.extend_context(tracks, cx));
+                }
+                Ok(_) => {}
+                Err(error) => log::error!("playback: cannot load radio queue: {error:#}"),
             })
-        });
+            .ok();
+        }));
     }
 
     fn play_radio_of(&mut self, origin: Origin, cx: &mut Context<Self>) {

@@ -2,11 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result};
 use librespot_core::Session;
-use librespot_protocol::extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery};
 use librespot_protocol::extension_kind::ExtensionKind;
 use librespot_protocol::metadata::Album as AlbumMessage;
 use librespot_protocol::metadata::album::Type as AlbumType;
-use protobuf::{EnumOrUnknown, Message as _};
+use protobuf::Message as _;
 
 use crate::spotify::{collection, collection2, pathfinder, wire};
 use crate::{Album, AlbumDetail, ReleaseType, Track};
@@ -50,19 +49,13 @@ pub async fn album(session: &Session, album_id: &str) -> Result<AlbumDetail> {
 
 async fn legacy_album(session: &Session, album_id: &str) -> Result<AlbumDetail> {
     let uri = format!("{ALBUM_PREFIX}{album_id}");
-    let request = batched(std::slice::from_ref(&uri));
-    let response = session
-        .spclient()
-        .get_extended_metadata(request)
-        .await
-        .context("cannot read album metadata")?;
-
-    let message = response
-        .extended_metadata
-        .into_iter()
-        .flat_map(|array| array.extension_data)
-        .find_map(|entity| AlbumMessage::parse_from_bytes(&entity.extension_data.value).ok())
-        .context("album metadata is missing")?;
+    let message =
+        collection::extended(session, std::slice::from_ref(&uri), ExtensionKind::ALBUM_V4)
+            .await
+            .context("cannot read album metadata")?
+            .into_iter()
+            .find_map(|entity| AlbumMessage::parse_from_bytes(&entity.extension_data.value).ok())
+            .context("album metadata is missing")?;
     let album = album_from(&uri, &message);
     let uris: Vec<_> = track_ids(&message)
         .into_iter()
@@ -99,63 +92,36 @@ fn track_ids(album: &AlbumMessage) -> Vec<String> {
         .collect()
 }
 
-fn batched(uris: &[String]) -> BatchedEntityRequest {
-    BatchedEntityRequest {
-        entity_request: uris
-            .iter()
-            .map(|uri| EntityRequest {
-                entity_uri: uri.clone(),
-                query: vec![ExtensionQuery {
-                    extension_kind: EnumOrUnknown::new(ExtensionKind::ALBUM_V4),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .collect(),
-        ..Default::default()
-    }
-}
-
 pub(crate) async fn metadata(session: &Session, uris: &[String]) -> Result<HashMap<String, Album>> {
-    let request = batched(uris);
-
-    let response = session
-        .spclient()
-        .get_extended_metadata(request)
+    let entities = collection::extended(session, uris, ExtensionKind::ALBUM_V4)
         .await
         .context("cannot read album metadata")?;
 
     let mut albums = HashMap::new();
-    for array in response.extended_metadata {
-        for entity in array.extension_data {
-            let Ok(message) = AlbumMessage::parse_from_bytes(&entity.extension_data.value) else {
-                continue;
-            };
-            let album = album_from(&entity.entity_uri, &message);
-            albums.insert(entity.entity_uri, album);
-        }
+    for entity in entities {
+        let Ok(message) = AlbumMessage::parse_from_bytes(&entity.extension_data.value) else {
+            continue;
+        };
+        let album = album_from(&entity.entity_uri, &message);
+        albums.insert(entity.entity_uri, album);
     }
     Ok(albums)
 }
 
 pub(crate) async fn track_uris(session: &Session, uris: &[String]) -> Result<Vec<String>> {
-    let response = session
-        .spclient()
-        .get_extended_metadata(batched(uris))
+    let entities = collection::extended(session, uris, ExtensionKind::ALBUM_V4)
         .await
         .context("cannot read album metadata")?;
 
     let mut seen = HashSet::new();
     let mut tracks = Vec::new();
-    for array in response.extended_metadata {
-        for entity in array.extension_data {
-            let Ok(message) = AlbumMessage::parse_from_bytes(&entity.extension_data.value) else {
-                continue;
-            };
-            for id in track_ids(&message) {
-                if seen.insert(id.clone()) {
-                    tracks.push(format!("{TRACK_PREFIX}{id}"));
-                }
+    for entity in entities {
+        let Ok(message) = AlbumMessage::parse_from_bytes(&entity.extension_data.value) else {
+            continue;
+        };
+        for id in track_ids(&message) {
+            if seen.insert(id.clone()) {
+                tracks.push(format!("{TRACK_PREFIX}{id}"));
             }
         }
     }

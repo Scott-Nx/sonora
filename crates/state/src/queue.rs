@@ -501,6 +501,15 @@ impl Queue {
         self.insert_upcoming(self.queued(), tracks, cx);
     }
 
+    pub(crate) fn extend_context(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let at = self.queued();
+        self.source.extend(tracks.iter().cloned());
+        for (offset, track) in tracks.into_iter().enumerate() {
+            self.upcoming.insert(at + offset, track);
+        }
+        self.changed(cx);
+    }
+
     pub fn insert_upcoming(
         &mut self,
         gap: usize,

@@ -167,6 +167,7 @@ impl Render for Workspace {
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.adapt(window, cx));
         let left = self.sidebar.read(cx).occupied_width();
+        let overlay_width = self.sidebar.read(cx).overlay_width();
         let right = self.sidebar_right.read(cx).occupied_width(window);
         Chrome::publish(left, right, cx);
         let covered = self.sidebar_right.read(cx).covers_content(window);
@@ -242,12 +243,14 @@ impl Render for Workspace {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .ml(overlay_width)
+                            .when(overlay, |this| this.overflow_hidden())
                             .when(hidden > 0., |this| this.overflow_hidden())
                             .when(covered, |this| this.hidden())
                             .child(
                                 div()
                                     .absolute()
-                                    .left_0()
+                                    .left(-overlay_width)
                                     .right_0()
                                     .top_0()
                                     .bottom_0()

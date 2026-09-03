@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationElement, AnimationExt as _, App, ElementId, Hsla, IntoElement, Pixels,
-    Rgba, SharedString, Styled, ease_in_out, ease_out_quint, px,
+    Rgba, SharedString, SpringConfig, Styled, ease_in_out, ease_out_quint, px,
 };
 use i18n::t;
 
@@ -15,6 +15,19 @@ const SLOW: Duration = Duration::from_millis(320);
 const ENTRANCE_EXTRA: Duration = Duration::from_millis(50);
 const ENTRANCE_BLUR: Pixels = px(1.5);
 const ENTRANCE_ZOOM: f32 = 0.01;
+
+/// Shared physical-motion presets. Call sites still own their stopping threshold and maximum
+/// timestep because those values depend on whether the spring moves pixels, opacity, or scale.
+pub enum Springs {}
+
+impl Springs {
+    /// The tuned lyrics-follow motion. This is an established visual contract.
+    pub const LYRICS_SCROLL: SpringConfig = SpringConfig::new(170., 23., 1.);
+    /// The first tuned lyrics-row spring, before viewport staggering lowers its frequency.
+    pub const LYRICS_ROW: SpringConfig = SpringConfig::new(210., 22., 1.);
+    /// Fast, nearly critically damped feedback for direct UI transitions.
+    pub const RESPONSIVE: SpringConfig = SpringConfig::new(360., 38., 1.);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Motion {

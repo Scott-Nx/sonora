@@ -360,7 +360,6 @@ impl Session {
             this.update(cx, |this, cx| {
                 this.prompt_task = None;
                 this.input = None;
-                this.awaiting = None;
                 match authorized {
                     Ok(session) => this.signed_in(session, index, cx),
                     Err(error) => this.failed(&error, cx),

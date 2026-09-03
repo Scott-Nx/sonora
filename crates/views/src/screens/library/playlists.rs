@@ -4,7 +4,7 @@ use ui::ActiveTheme as _;
 use gpui::{AnyElement, App, Entity, TextAlign};
 use music::Playlist;
 use router::Destination;
-use state::{Library, LibraryState, Origin, Playback};
+use state::{Library, LibraryPart, LibraryState, Origin, Playback};
 use ui::rank::{ESSENTIAL, HANDY, NICE, SPARE};
 use ui::{Cell, ColumnSpec, Menu, Pin, TableSource, Width};
 
@@ -142,8 +142,8 @@ impl TableSource for PlaylistSource {
 
     fn is_loading(&self, cx: &App) -> bool {
         match self.local {
-            true => self.library.read(cx).local_is_loading(),
-            false => self.library.read(cx).is_loading(),
+            true => self.library.read(cx).local_loading(LibraryPart::Playlists),
+            false => self.library.read(cx).loading(LibraryPart::Playlists),
         }
     }
 

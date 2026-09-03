@@ -7,6 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-03
+
+### Added
+
+- Sonora ships as a Flatpak. Every release attaches a bundle for x86_64 and aarch64, and adding
+  the Sonora repository once (`flatpak install --user https://nolight132.github.io/sonora/sonora.flatpakref`)
+  keeps it current through `flatpak update`.
+- Italian and Brazilian Portuguese translations.
+
+### Changed
+
+- Each section of Your Library appears as soon as it has loaded instead of waiting for the slowest
+  one, and a section that fails no longer holds the others back.
+- Quick Picks and Listen Again start the chosen song at once and fill the queue behind it with
+  recommendations, instead of queuing the rest of the shelf.
+- The fullscreen player's controls settle in and out on a spring when it wakes or goes idle.
+- Karaoke lines that overlap in time each keep sweeping until they finish, background vocals sing
+  through in a softer tone, and a finished line fades to gray instead of snapping.
+- Windows uses Sonora's window controls without the native system control strip.
+- The best match on the search page carries a play button whatever it is, so an album, artist or
+  playlist starts from there just like a song. In the single-column layout it scrolls with the
+  results instead of staying pinned above them.
+
+### Fixed
+
+- Large Spotify libraries load again: track and album metadata is fetched in smaller batches
+  that stay within what the service accepts.
+- Content no longer shows through an overlaid sidebar when window transparency is enabled.
+- Building Sonora on Windows no longer requires a separately installed SQLite library.
+- A sign-in failure in Settings now appears on the card of the service you were signing in to.
+- Running Sonora through Nix on a system other than NixOS finds a Vulkan driver and the ALSA
+  plugins it needs for audio.
+
 ## [0.28.1] - 2026-09-02
 
 ### Changed
@@ -1217,7 +1250,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Initial release: a native Spotify client with playback, an interactive queue, the saved library,
 search, album, playlist, artist and song pages, context menus and adaptive theming.
 
-[unreleased]: https://github.com/nolight132/sonora/compare/v0.28.1...HEAD
+[unreleased]: https://github.com/nolight132/sonora/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/nolight132/sonora/compare/v0.28.1...v0.29.0
 [0.28.1]: https://github.com/nolight132/sonora/compare/v0.28.0...v0.28.1
 [0.28.0]: https://github.com/nolight132/sonora/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/nolight132/sonora/compare/v0.26.0...v0.27.0

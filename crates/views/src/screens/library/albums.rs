@@ -5,7 +5,7 @@ use ui::ActiveTheme as _;
 use gpui::{AnyElement, App, Entity, SharedString, TextAlign};
 use i18n::t;
 use music::Album;
-use state::{Library, LibraryState, Origin, Playback};
+use state::{Library, LibraryPart, LibraryState, Origin, Playback};
 use ui::rank::{HANDY, NICE, SPARE, USEFUL};
 use ui::{Cell, ColumnSpec, Menu, Pin, TableSource, Width};
 
@@ -212,8 +212,8 @@ impl TableSource for AlbumSource {
 
     fn is_loading(&self, cx: &App) -> bool {
         match self.local {
-            true => self.library.read(cx).local_is_loading(),
-            false => self.library.read(cx).is_loading(),
+            true => self.library.read(cx).local_loading(LibraryPart::Albums),
+            false => self.library.read(cx).loading(LibraryPart::Albums),
         }
     }
 

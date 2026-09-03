@@ -213,10 +213,16 @@ impl Tracks for ShelfTracks {
     }
 
     fn is_loading(&self, cx: &App) -> bool {
-        match self.shelf {
-            Shelf::Local => self.library.read(cx).local_is_loading(),
-            Shelf::Saved => self.library.read(cx).is_loading(),
-        }
+        loading(&self.library, self.shelf, self.section, cx)
+    }
+}
+
+fn loading(library: &Entity<Library>, shelf: Shelf, section: Section, cx: &App) -> bool {
+    let library = library.read(cx);
+    match (shelf, section) {
+        (Shelf::Local, Section::Favorites) => library.local_favorites_loading(),
+        (Shelf::Local, _) => library.local_loading(section.part()),
+        (Shelf::Saved, _) => library.loading(section.part()),
     }
 }
 
@@ -536,18 +542,14 @@ impl LibraryView {
         page::store(&self.settings.clone(), self.table(section), key, key, cx);
     }
 
-    pub fn is_loading(&self, cx: &App) -> bool {
-        match self.shelf {
-            Shelf::Local => self.library.read(cx).local_is_loading(),
-            Shelf::Saved => self.library.read(cx).is_loading(),
-        }
-    }
-
     fn unconfigured(&self, cx: &App) -> bool {
         self.shelf.local() && Sonora::global(cx).session.read(cx).local_path().is_none()
     }
 
     fn note(&self, cx: &App) -> Option<Vacancy> {
+        if loading(&self.library, self.shelf, self.section, cx) {
+            return None;
+        }
         let library = self.library.read(cx);
         let table = self.table(self.section);
         let state = match self.shelf {

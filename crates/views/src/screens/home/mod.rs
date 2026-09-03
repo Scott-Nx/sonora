@@ -157,9 +157,10 @@ impl Render for HomeView {
                 open_menu(&home, &tracks, place, event, cx);
             })
             .on_start(move |place, cx| {
-                playback.update(cx, |playback, cx| {
-                    playback.start(started.as_ref().clone(), place, None, cx)
-                });
+                let Some(track) = started.get(place) else {
+                    return;
+                };
+                playback.update(cx, |playback, cx| playback.play_radio(track, cx));
             })
         });
 
@@ -193,9 +194,10 @@ impl Render for HomeView {
             open_menu(&home, &tracks, place, event, cx);
         })
         .on_start(move |place, cx| {
-            playback.update(cx, |playback, cx| {
-                playback.start(started.as_ref().clone(), place, None, cx)
-            });
+            let Some(track) = started.get(place) else {
+                return;
+            };
+            playback.update(cx, |playback, cx| playback.play_radio(track, cx));
         });
 
         let sections = self.home.read(cx).sections();

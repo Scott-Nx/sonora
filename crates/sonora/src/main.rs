@@ -176,7 +176,7 @@ fn open_window(
         },
         |window, cx| {
             window.set_rem_size(cx.theme().font_size);
-            state::attach_remote(window_handle(window), cx);
+            state::attach_remote(platform_handle(window), cx);
             state::remember_window(window, cx);
             cx.new(|cx| Root::new(session, library, playback, queue, window, cx))
         },
@@ -185,16 +185,29 @@ fn open_window(
 }
 
 #[cfg(target_os = "windows")]
-fn window_handle(window: &gpui::Window) -> Option<*mut std::ffi::c_void> {
+fn platform_handle(window: &gpui::Window) -> Option<*mut std::ffi::c_void> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
+    };
 
-    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
-        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut std::ffi::c_void),
-        _ => None,
+    let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    let handle = handle.hwnd.get() as *mut std::ffi::c_void;
+    unsafe {
+        DwmSetWindowAttribute(
+            handle,
+            DWMWA_NCRENDERING_POLICY as u32,
+            &DWMNCRP_DISABLED as *const _ as *const std::ffi::c_void,
+            size_of_val(&DWMNCRP_DISABLED) as u32,
+        );
     }
+    Some(handle)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn window_handle(_window: &gpui::Window) -> Option<*mut std::ffi::c_void> {
+fn platform_handle(_window: &gpui::Window) -> Option<*mut std::ffi::c_void> {
     None
 }

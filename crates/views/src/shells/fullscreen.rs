@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyView, App, Context, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, Task, ease_in_out,
+    SharedString, SpringState, Task,
 };
 use gpui::{Window, div, px, relative};
 use i18n::t;
@@ -13,7 +13,7 @@ use router::{Destination, navigate};
 use state::{Cover, Playback, Queue, SideTab, Sonora};
 use ui::{
     ActiveTheme as _, Artwork, Button, ExplicitBadge, InlineLink, InlineLinks, Motion,
-    Motioned as _, Popup, Room, Scrollbar, Scrubber, ScrubberState, Text, clock, snapped,
+    Motioned as _, Popup, Room, Scrollbar, Scrubber, ScrubberState, Springs, Text, clock, snapped,
 };
 
 use crate::chrome::{Aside, TitleBarOptions};
@@ -31,6 +31,7 @@ const COVER_TALL_TIGHT_REST: f32 = 0.72;
 const COVER_MIN: f32 = 96.;
 const COVER_MAX: f32 = 520.;
 const COVER_MAX_REST: f32 = 560.;
+const COVER_LAYER_PAD: f32 = 2.;
 const RESERVE: f32 = 2.9;
 const RESERVE_REST: f32 = 1.3;
 const DOCK: f32 = 1.15;
@@ -44,6 +45,8 @@ const CLOCK_SHORT: f32 = 3.4;
 const CLOCK_LONG: f32 = 5.4;
 const REST: Duration = Duration::from_millis(1500);
 const WAKE_DEBOUNCE: Duration = Duration::from_millis(400);
+const SPRING_REST: f32 = 0.001;
+const SPRING_STALL: Duration = Duration::from_millis(64);
 
 pub struct FullscreenView {
     playback: Entity<Playback>,
@@ -67,8 +70,8 @@ pub struct FullscreenView {
     context_menu: Option<(music::Track, Point<Pixels>)>,
     last_moved: Instant,
     awake: bool,
-    hidden_from: f32,
-    turned: Instant,
+    hidden: SpringState,
+    spring_beat: Instant,
     rest: Option<Task<()>>,
     focus: FocusHandle,
 }
@@ -107,8 +110,11 @@ impl FullscreenView {
             context_menu: None,
             last_moved: Instant::now(),
             awake: true,
-            hidden_from: 0.,
-            turned: Instant::now(),
+            hidden: SpringState {
+                position: 0.,
+                velocity: 0.,
+            },
+            spring_beat: Instant::now(),
             rest: None,
             focus: cx.focus_handle(),
         };
@@ -179,35 +185,37 @@ impl FullscreenView {
         if self.awake == awake {
             return;
         }
-        self.hidden_from = self.hidden_now();
         self.awake = awake;
-        self.turned = Instant::now();
+        self.spring_beat = Instant::now();
     }
 
-    fn hidden_now(&self) -> f32 {
-        let span = Motion::Slow.span().as_secs_f32().max(f32::EPSILON);
-        let progress = (self.turned.elapsed().as_secs_f32() / span).clamp(0., 1.);
-        let target = match self.awake {
-            true => 0.,
-            false => 1.,
-        };
-
-        self.hidden_from + (target - self.hidden_from) * ease_in_out(progress)
-    }
-
-    fn hidden(&self, window: &mut Window, cx: &App) -> f32 {
+    fn hidden(&mut self, window: &mut Window, cx: &App) -> f32 {
         let target = match self.awake {
             true => 0.,
             false => 1.,
         };
         if cx.reduce_motion() {
+            self.hidden = SpringState {
+                position: target,
+                velocity: 0.,
+            };
+            self.spring_beat = Instant::now();
             return target;
         }
-        let span = Motion::Slow.span().as_secs_f32().max(f32::EPSILON);
-        if self.hidden_from != target && self.turned.elapsed().as_secs_f32() < span {
+
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.spring_beat).min(SPRING_STALL);
+        self.spring_beat = now;
+        self.hidden = Springs::RESPONSIVE.step(self.hidden, target, elapsed.as_secs_f32());
+        if Springs::RESPONSIVE.is_settled(self.hidden, target, SPRING_REST) {
+            self.hidden = SpringState {
+                position: target,
+                velocity: 0.,
+            };
+        } else {
             window.request_animation_frame();
         }
-        self.hidden_now()
+        self.hidden.position.clamp(0., 1.)
     }
 
     fn volume_open(&self) -> bool {
@@ -244,8 +252,16 @@ impl FullscreenView {
             .update(cx, |playback, cx| playback.seek_fraction(fraction, cx));
     }
 
-    fn artwork(&mut self, side: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
+    fn artwork(
+        &mut self,
+        layout_side: Pixels,
+        raster_side: Pixels,
+        presentation_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let radius = cx.theme().radius * 2.;
+        let pad = px(COVER_LAYER_PAD);
+        let inset = (layout_side - raster_side) / 2. - pad;
         let track = self.playback.read(cx).track().cloned();
         let album = track.as_ref().and_then(|track| track.album_id.clone());
         let small = track.as_ref().and_then(|track| track.cover.clone());
@@ -266,30 +282,44 @@ impl FullscreenView {
         div()
             .id("fullscreen-artwork")
             .relative()
-            .size(side)
+            .size(layout_side)
             .flex_none()
             .when_some(album, |this, album| {
                 this.cursor_pointer()
                     .on_click(move |_, _, cx| open_album(&album, cx))
             })
             .child(
-                Artwork::new(small)
-                    .size(side)
-                    .corner_radius(radius)
-                    .soft(waiting),
+                div()
+                    .absolute()
+                    .top(inset)
+                    .left(inset)
+                    .size(raster_side + pad * 2.)
+                    .layer_scale(presentation_scale)
+                    .child(
+                        div().absolute().top(pad).left(pad).child(
+                            Artwork::new(small)
+                                .size(raster_side)
+                                .corner_radius(radius)
+                                .soft(waiting),
+                        ),
+                    )
+                    .when_some(large, |this, url| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(pad)
+                                .left(pad)
+                                .child(
+                                    Artwork::new(Some(url))
+                                        .size(raster_side)
+                                        .corner_radius(radius),
+                                )
+                                .motion(("cover-large", revision), Motion::Slow, |art, t| {
+                                    art.opacity(t)
+                                }),
+                        )
+                    }),
             )
-            .when_some(large, |this, url| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .child(Artwork::new(Some(url)).size(side).corner_radius(radius))
-                        .motion(("cover-large", revision), Motion::Slow, |art, t| {
-                            art.opacity(t)
-                        }),
-                )
-            })
     }
 
     fn open_context_menu(
@@ -305,6 +335,7 @@ impl FullscreenView {
 
     fn meta(&self, hide: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
+        let shown = 1. - hide;
         let track = self.playback.read(cx).track().cloned();
         let title = match &track {
             Some(track) => SharedString::from(track.name.clone()),
@@ -315,12 +346,20 @@ impl FullscreenView {
         let held = track.clone();
 
         div()
+            .relative()
             .flex()
             .flex_col()
+            .flex_none()
             .items_center()
             .gap_1()
             .w_full()
             .min_w_0()
+            .when(hide > 0., |this| {
+                this.max_h(theme.metrics.player_bar * shown)
+                    .overflow_hidden()
+                    .opacity(shown)
+                    .top(px(SINK) * hide)
+            })
             .child(
                 div()
                     .flex()
@@ -359,13 +398,7 @@ impl FullscreenView {
                     .when(explicit, |this| {
                         this.child(div().flex_none().child(ExplicitBadge::new()))
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .opacity(1. - hide)
-                            .child(like(track.clone(), cx)),
-                    ),
+                    .child(div().flex().flex_none().child(like(track.clone(), cx))),
             )
             .when_some(track, |this, track| {
                 this.child(
@@ -856,7 +889,13 @@ impl Render for FullscreenView {
         };
         let near = fit(tall, wide, RESERVE, ceiling);
         let far = fit(tall_rest, wide_rest, RESERVE_REST, ceiling_rest);
-        let side = snapped(near + (far - near) * hide, window);
+        let presented_side = near + (far - near) * hide;
+        // The flex item must never change size when the idle state flips: even a one-frame
+        // near/far swap makes the centred column relayout. Keep its awake footprint forever and
+        // animate only the fixed large raster surface in the compositor.
+        let side = snapped(near, window);
+        let raster_side = snapped(far, window);
+        let cover_scale = presentation_scale(presented_side, raster_side);
         let staged = self.panel.is_none() || split;
 
         div()
@@ -872,7 +911,6 @@ impl Render for FullscreenView {
             .gap_5()
             .px_8()
             .pb_6()
-            .bg(theme.background)
             .on_mouse_move(cx.listener(Self::hover))
             .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.poke(cx)))
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.poke(cx)))
@@ -901,7 +939,7 @@ impl Render for FullscreenView {
                                     |this| this.flex_1().h_full(),
                                     |this| this.w_full(),
                                 )
-                                .child(self.artwork(side, cx))
+                                .child(self.artwork(side, raster_side, cover_scale, cx))
                                 .child(self.meta(hide, cx))
                                 .when(split, |this| {
                                     this.child(self.dock(theme.metrics.player_bar * DOCK, hide, cx))
@@ -940,5 +978,23 @@ impl Render for FullscreenView {
                 )
             })
             .children(self.menu(cx))
+    }
+}
+
+fn presentation_scale(presented: Pixels, layout: Pixels) -> f32 {
+    presented.as_f32() / layout.as_f32()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_spring_preserves_a_subpixel_size() {
+        let presented = px(200.25);
+        let layout = px(200.);
+        let scale = presentation_scale(presented, layout);
+
+        assert!((layout.as_f32() * scale - presented.as_f32()).abs() < 0.001);
     }
 }

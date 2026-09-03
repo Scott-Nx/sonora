@@ -10,15 +10,30 @@ use music::{Album, MusicApi, Playlist, SavedArtist, Track};
 use crate::{Io, Outcome, Session, SessionEvent, Target, Toasts, join, mosaic};
 
 const PAGE_LIMIT: u32 = 10000;
+const FATAL: [LibraryPart; 3] = [
+    LibraryPart::Tracks,
+    LibraryPart::Playlists,
+    LibraryPart::Albums,
+];
+const FATAL_LOCAL: [LibraryPart; 2] = [LibraryPart::Tracks, LibraryPart::Albums];
 
-type Loaded = (
-    anyhow::Result<Vec<Track>>,
-    anyhow::Result<Vec<Playlist>>,
-    anyhow::Result<Vec<Album>>,
-    anyhow::Result<Vec<SavedArtist>>,
-);
+enum Landed {
+    Tracks(anyhow::Result<Vec<Track>>),
+    Playlists(anyhow::Result<Vec<Playlist>>),
+    Albums(anyhow::Result<Vec<Album>>),
+    Artists(anyhow::Result<Vec<SavedArtist>>),
+}
 
-type LoadedLocal = Loaded;
+impl Landed {
+    fn part(&self) -> LibraryPart {
+        match self {
+            Self::Tracks(_) => LibraryPart::Tracks,
+            Self::Playlists(_) => LibraryPart::Playlists,
+            Self::Albums(_) => LibraryPart::Albums,
+            Self::Artists(_) => LibraryPart::Artists,
+        }
+    }
+}
 
 struct PlaylistMutation {
     action: &'static str,
@@ -29,35 +44,53 @@ struct PlaylistMutation {
     local: bool,
 }
 
-fn partial(loaded: Loaded) -> LibraryState {
-    let (tracks, playlists, albums, artists) = loaded;
-    if let (Err(tracks), Err(playlists), Err(albums)) = (&tracks, &playlists, &albums) {
-        return LibraryState::Failed(format!("{tracks:#}\n{playlists:#}\n{albums:#}"));
+fn place(
+    state: &mut LibraryState,
+    awaited: &mut Vec<LibraryPart>,
+    landed: Landed,
+    fatal: &[LibraryPart],
+) {
+    awaited.retain(|part| *part != landed.part());
+    if !matches!(state, LibraryState::Ready { .. }) {
+        *state = LibraryState::Ready {
+            tracks: Vec::new(),
+            playlists: Vec::new(),
+            albums: Vec::new(),
+            artists: Vec::new(),
+            problems: Vec::new(),
+        };
     }
 
-    let mut problems = Vec::new();
-    LibraryState::Ready {
-        tracks: take(LibraryPart::Tracks, tracks, &mut problems),
-        playlists: take(LibraryPart::Playlists, playlists, &mut problems),
-        albums: take(LibraryPart::Albums, albums, &mut problems),
-        artists: take(LibraryPart::Artists, artists, &mut problems),
-        problems,
-    }
-}
-
-fn partial_local(loaded: LoadedLocal) -> LibraryState {
-    let (tracks, playlists, albums, artists) = loaded;
-    if let (Err(tracks), Err(albums)) = (&tracks, &albums) {
-        return LibraryState::Failed(format!("{tracks:#}\n{albums:#}"));
-    }
-
-    let mut problems = Vec::new();
-    LibraryState::Ready {
-        tracks: take(LibraryPart::Tracks, tracks, &mut problems),
-        playlists: take(LibraryPart::Playlists, playlists, &mut problems),
-        albums: take(LibraryPart::Albums, albums, &mut problems),
-        artists: take(LibraryPart::Artists, artists, &mut problems),
-        problems,
+    let failure = {
+        let LibraryState::Ready {
+            tracks,
+            playlists,
+            albums,
+            artists,
+            problems,
+        } = state
+        else {
+            return;
+        };
+        let part = landed.part();
+        match landed {
+            Landed::Tracks(result) => *tracks = take(part, result, problems),
+            Landed::Playlists(result) => *playlists = take(part, result, problems),
+            Landed::Albums(result) => *albums = take(part, result, problems),
+            Landed::Artists(result) => *artists = take(part, result, problems),
+        }
+        if !awaited.is_empty() {
+            return;
+        }
+        let reasons: Vec<&str> = fatal
+            .iter()
+            .filter_map(|part| problems.iter().find(|problem| problem.part == *part))
+            .map(|problem| problem.reason.as_str())
+            .collect();
+        (reasons.len() == fatal.len()).then(|| reasons.join("\n"))
+    };
+    if let Some(reason) = failure {
+        *state = LibraryState::Failed(reason);
     }
 }
 
@@ -280,6 +313,8 @@ pub enum LibraryPart {
 }
 
 impl LibraryPart {
+    const ALL: [Self; 4] = [Self::Tracks, Self::Playlists, Self::Albums, Self::Artists];
+
     fn label(self) -> &'static str {
         match self {
             Self::Tracks => "songs",
@@ -314,10 +349,13 @@ pub struct Library {
     state: LibraryState,
     local: LibraryState,
     local_favorites: Vec<Track>,
+    local_favorites_loading: bool,
+    awaited: Vec<LibraryPart>,
+    local_awaited: Vec<LibraryPart>,
     session: Entity<Session>,
     io: Io,
-    task: Option<Task<()>>,
-    local_task: Option<Task<()>>,
+    tasks: Vec<Task<()>>,
+    local_tasks: Vec<Task<()>>,
     playlist_task: Option<Task<()>>,
     pending: HashMap<String, Task<()>>,
     pending_albums: HashMap<String, Task<()>>,
@@ -345,7 +383,8 @@ impl Library {
                 this.contents.clear();
                 this.reading.clear();
                 this.mosaics.clear();
-                this.task = None;
+                this.tasks.clear();
+                this.awaited.clear();
                 this.playlist_task = None;
                 this.pending.clear();
                 this.pending_albums.clear();
@@ -365,9 +404,11 @@ impl Library {
                 match client {
                     Some(client) => this.load_local(client, cx),
                     None => {
-                        this.local_task = None;
+                        this.local_tasks.clear();
+                        this.local_awaited.clear();
                         this.local = LibraryState::Empty;
                         this.local_favorites.clear();
+                        this.local_favorites_loading = false;
                         cx.notify();
                     }
                 }
@@ -381,10 +422,13 @@ impl Library {
             state: LibraryState::Loading,
             local: LibraryState::Empty,
             local_favorites: Vec::new(),
+            local_favorites_loading: false,
+            awaited: Vec::new(),
+            local_awaited: Vec::new(),
             session,
             io,
-            task: None,
-            local_task: None,
+            tasks: Vec::new(),
+            local_tasks: Vec::new(),
             playlist_task: None,
             pending: HashMap::new(),
             pending_albums: HashMap::new(),
@@ -433,12 +477,16 @@ impl Library {
             .update(cx, |session, cx| session.clear_local_folder(cx));
     }
 
-    pub fn is_loading(&self) -> bool {
-        matches!(self.state, LibraryState::Loading)
+    pub fn loading(&self, part: LibraryPart) -> bool {
+        matches!(self.state, LibraryState::Loading) || self.awaited.contains(&part)
     }
 
-    pub fn local_is_loading(&self) -> bool {
-        matches!(self.local, LibraryState::Loading)
+    pub fn local_loading(&self, part: LibraryPart) -> bool {
+        matches!(self.local, LibraryState::Loading) || self.local_awaited.contains(&part)
+    }
+
+    pub fn local_favorites_loading(&self) -> bool {
+        self.local_favorites_loading
     }
 
     pub fn saved(&self, track_id: &str) -> bool {
@@ -1161,67 +1209,116 @@ impl Library {
         self.pending_albums.clear();
         self.pending_artists.clear();
         self.state = LibraryState::Loading;
+        self.awaited = LibraryPart::ALL.to_vec();
         cx.notify();
 
-        let io = self.io.clone();
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let loaded = join(io.spawn(async move {
-                anyhow::Ok(tokio::join!(
-                    client.saved_tracks(PAGE_LIMIT),
-                    client.playlists(PAGE_LIMIT),
-                    client.saved_albums(PAGE_LIMIT),
-                    client.saved_artists(PAGE_LIMIT)
-                ))
-            }))
-            .await;
-
-            this.update(cx, |this, cx| {
-                this.state = match loaded {
-                    Ok(loaded) => partial(loaded),
-                    Err(error) => LibraryState::Failed(format!("{error:#}")),
-                };
-                this.read_playlists(cx);
-                this.build_mosaics(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
+        let tracks = client.clone();
+        let playlists = client.clone();
+        let albums = client.clone();
+        self.tasks = vec![
+            self.fetch(
+                async move { tracks.saved_tracks(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land(Landed::Tracks(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { playlists.playlists(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land(Landed::Playlists(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { albums.saved_albums(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land(Landed::Albums(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { client.saved_artists(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land(Landed::Artists(loaded), cx),
+                cx,
+            ),
+        ];
     }
 
     fn load_local(&mut self, client: Arc<dyn MusicApi>, cx: &mut Context<Self>) {
         self.local = LibraryState::Loading;
+        self.local_awaited = LibraryPart::ALL.to_vec();
+        self.local_favorites_loading = true;
         cx.notify();
 
-        let io = self.io.clone();
-        self.local_task = Some(cx.spawn(async move |this, cx| {
-            let loaded = join(io.spawn(async move {
-                anyhow::Ok(tokio::join!(
-                    client.all_tracks(PAGE_LIMIT),
-                    client.playlists(PAGE_LIMIT),
-                    client.saved_albums(PAGE_LIMIT),
-                    client.saved_artists(PAGE_LIMIT),
-                    client.saved_tracks(PAGE_LIMIT)
-                ))
-            }))
-            .await;
+        let tracks = client.clone();
+        let playlists = client.clone();
+        let albums = client.clone();
+        let artists = client.clone();
+        self.local_tasks = vec![
+            self.fetch(
+                async move { tracks.all_tracks(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land_local(Landed::Tracks(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { playlists.playlists(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land_local(Landed::Playlists(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { albums.saved_albums(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land_local(Landed::Albums(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { artists.saved_artists(PAGE_LIMIT).await },
+                |this, loaded, cx| this.land_local(Landed::Artists(loaded), cx),
+                cx,
+            ),
+            self.fetch(
+                async move { client.saved_tracks(PAGE_LIMIT).await },
+                |this, loaded, cx| {
+                    this.local_favorites = loaded.unwrap_or_else(|error| {
+                        log::warn!("library: cannot load the local favorites: {error:#}");
+                        Vec::new()
+                    });
+                    this.local_favorites_loading = false;
+                    cx.notify();
+                },
+                cx,
+            ),
+        ];
+    }
 
-            this.update(cx, |this, cx| {
-                let (state, favorites) = match loaded {
-                    Ok((tracks, playlists, albums, artists, favorites)) => (
-                        partial_local((tracks, playlists, albums, artists)),
-                        favorites.unwrap_or_else(|error| {
-                            log::warn!("library: cannot load the local favorites: {error:#}");
-                            Vec::new()
-                        }),
-                    ),
-                    Err(error) => (LibraryState::Failed(format!("{error:#}")), Vec::new()),
-                };
-                this.local = state;
-                this.local_favorites = favorites;
-                this.read_local_playlists(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
+    fn fetch<T, R, A>(&self, work: R, apply: A, cx: &mut Context<Self>) -> Task<()>
+    where
+        R: Future<Output = anyhow::Result<T>> + Send + 'static,
+        T: Send + 'static,
+        A: FnOnce(&mut Self, anyhow::Result<T>, &mut Context<Self>) + 'static,
+    {
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let loaded = join(io.spawn(work)).await;
+            this.update(cx, |this, cx| apply(this, loaded, cx)).ok();
+        })
+    }
+
+    fn land(&mut self, landed: Landed, cx: &mut Context<Self>) {
+        let part = landed.part();
+        place(&mut self.state, &mut self.awaited, landed, &FATAL);
+        if part == LibraryPart::Playlists {
+            self.read_playlists(cx);
+            self.build_mosaics(cx);
+        }
+        cx.notify();
+    }
+
+    fn land_local(&mut self, landed: Landed, cx: &mut Context<Self>) {
+        let part = landed.part();
+        place(
+            &mut self.local,
+            &mut self.local_awaited,
+            landed,
+            &FATAL_LOCAL,
+        );
+        if part == LibraryPart::Playlists {
+            self.read_local_playlists(cx);
+        }
+        cx.notify();
     }
 }

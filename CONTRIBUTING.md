@@ -143,24 +143,6 @@ t!("song-disc-track", disc = disc, track = number)
 
 Developer-facing text — `.context("cannot …")`, `log::warn!`, wire values — stays in English.
 
-## Translations
-
-English is the source of truth and must carry every key. Other locales may lag: a missing key falls
-back to English at runtime, so a partial translation is a fine contribution — don't machine-translate
-a language you don't speak just to fill the table. The tests only check that English is complete and
-that no locale invents a key.
-
-```sh
-$EDITOR assets/i18n/uk/main.ftl        # fill in what it lacks
-scripts/i18n-coverage.py              # refresh the table in README.md
-cargo test -p i18n
-```
-
-A new language needs `assets/i18n/<locale>/main.ftl` plus a `Language` variant in
-`crates/i18n/src/language.rs` (`id`, `label`, `tag`, `source`, `ALL`). Plural rules come from Fluent
-selectors, so check `count-songs` against your language's categories rather than concatenating
-strings.
-
 **Register new assets.** SVGs go in `assets/icons/` and their stem goes in the `ICONS` list in
 `crates/sonora/src/assets.rs`, otherwise loading logs `assets: … is not registered` and renders
 nothing.
@@ -178,6 +160,27 @@ librespot or sockets goes inside `io.spawn`, mutations happen in `this.update`, 
 Never `.detach()` a data load. New network-backed features belong in a `state` entity, not a view.
 
 **Comments: essentially none.** Name things so they don't need one. If a comment is unavoidable it should stay concise, no trailing period.
+
+## Translations
+
+English is the source of truth and must carry every key. Other locales may lag: a missing key falls
+back to English at runtime, so a partial translation is a fine contribution — don't machine-translate
+a language you don't speak just to fill the table. The tests only check that English is complete and
+that no locale invents a key.
+
+The coverage table in [README.md](README.md#translations) shows where each locale stands; strings
+live in `assets/i18n/<locale>/main.ftl`.
+
+```sh
+$EDITOR assets/i18n/uk/main.ftl        # fill in what it lacks
+scripts/i18n-coverage.py              # refresh the table in README.md
+cargo test -p i18n
+```
+
+A new language needs `assets/i18n/<locale>/main.ftl` plus a `Language` variant in
+`crates/i18n/src/language.rs` (`id`, `label`, `tag`, `source`, `ALL`). Plural rules come from Fluent
+selectors, so check `count-songs` against your language's categories rather than concatenating
+strings.
 
 ## Generated files
 

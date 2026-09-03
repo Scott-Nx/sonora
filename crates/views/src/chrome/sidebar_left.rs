@@ -173,6 +173,13 @@ impl SidebarLeft {
         self.cramped && self.is_open()
     }
 
+    pub fn overlay_width(&self) -> Pixels {
+        match self.overlays() {
+            true => self.width,
+            false => Pixels::ZERO,
+        }
+    }
+
     fn dismiss(&mut self, cx: &mut Context<Self>) {
         if !self.overlays() {
             return;

@@ -3,7 +3,7 @@ use ui::ActiveTheme as _;
 
 use gpui::{AnyElement, App, Entity, SharedString};
 use music::SavedArtist;
-use state::{Library, LibraryState, Origin, Playback};
+use state::{Library, LibraryPart, LibraryState, Origin, Playback};
 use ui::rank::{ESSENTIAL, HANDY};
 use ui::{Cell, ColumnSpec, Menu, Pin, TableSource, Width};
 
@@ -118,8 +118,8 @@ impl TableSource for ArtistSource {
 
     fn is_loading(&self, cx: &App) -> bool {
         match self.local {
-            true => self.library.read(cx).local_is_loading(),
-            false => self.library.read(cx).is_loading(),
+            true => self.library.read(cx).local_loading(LibraryPart::Artists),
+            false => self.library.read(cx).loading(LibraryPart::Artists),
         }
     }
 

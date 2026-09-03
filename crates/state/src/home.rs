@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{App, Context, Entity, Task};
 use music::{GenreItem, GenreSection, Track};
 
-use crate::{Io, Library, LibraryState, Session, SessionEvent, join};
+use crate::{Io, Library, LibraryPart, LibraryState, Session, SessionEvent, join};
 
 const GROUP_SIZE: usize = 10;
 const LIMIT: usize = GROUP_SIZE * 3;
@@ -154,7 +154,7 @@ impl Home {
     }
 
     pub fn is_loading(&self, cx: &App) -> bool {
-        self.library.read(cx).is_loading()
+        self.library.read(cx).loading(LibraryPart::Tracks)
     }
 }
 
